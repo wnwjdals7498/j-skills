@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Management Tool v2"
+  short_description: "Local-first project execution with resumable state"
+  default_prompt: "Use $proj-mgmt-tool-v2 to create or resume a local project and safely manage its work."

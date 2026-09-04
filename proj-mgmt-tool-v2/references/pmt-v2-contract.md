@@ -1,74 +1,116 @@
-# PMT v2 CLI 계약
+# PMT v2 계약
 
-`scripts/pmt.py`는 Python 3.8+ 표준 라이브러리만 사용한다. 전역 옵션은 `--docs-root`, `--session`, `--project`이며 환경 변수 `PMT_DOCS_ROOT`, `PMT_SESSION`을 같은 용도로 쓸 수 있다. 프로젝트 폴더 내부에서는 slug를 자동 감지한다.
+`scripts/pmt.py`는 Python 3.8+ 표준 라이브러리만 쓴다. 전역 옵션은 `--docs-root`, `--session`, `--project`이고 환경 변수 `PMT_DOCS_ROOT`, `PMT_SESSION`도 지원한다.
 
-## 저장 구조
+## 저장 트리
 
 ```text
 <docs-root>/
 ├── projects/projects.md
 ├── projects/<slug>/
 │   ├── project.md
-│   ├── RESUME.md  graph.md  graph.json  Doing.md  index.md
+│   ├── RESUME.md
 │   ├── facts.md  decisions.md  backlog.md
-│   ├── archive/  .locks/  resources/{originals,derived,evidence}/
-│   ├── _default/Work1.md  _default/Work1-1.md
+│   ├── decisions/D<n>.md
+│   ├── archive/{facts,decisions,backlog}.md
+│   ├── canceled/<class>__<stem>.md
+│   ├── .locks/
+│   ├── resources/{originals,derived,evidence}/
+│   ├── _default/Work1.md  Work1-1.md
 │   └── <classification>/...
+├── worklog/<slug>__<class>__<item>.md
 ├── worklog/done/
-└── times/YYYY-MM.md
+├── times/YYYY-MM.md
+└── .repo-locks/
 ```
 
-Classification 기본값은 `_default`다. 활성 Work가 6개를 넘으면 `sync`가 분류를 제안하지만 자동 이동하지 않는다. Item `kind`는 `job`, `view`, `test`, `hotfix`; 깊이는 최대 3이고 `test` 자식은 금지한다.
+생성물은 `RESUME.md`와 `projects.md`뿐이다. 나머지는 원본 또는 lock이다. v1 이관을 적용할 때만 프로젝트 안에 `.migration-v1-backup/`을 만든다.
 
-## 생성·추가
+## 문서 형식
 
-| 명령 | 핵심 동작 |
+Item frontmatter 핵심은 `type`, `kind`, `id`, `parent`, `status`, `updated`, `blocked_by`, `base_commit`, `verify`다. 본문 절은 기본 내용·범위·완료 기준·재개·검증·결과·증거 순이다.
+
+`## 재개`는 `note`가 다음 여섯 키를 통째로 갱신한다.
+
+```text
+- 갱신: <시각> (session <id>)
+- 한 것: <내용>
+- 다음: <내용>
+- 주의: <내용 또는 없음>
+- 대기: <내용 또는 없음>
+- 검증 못 한 것: <내용 또는 없음>
+```
+
+각 값은 400자 이하다. stale lock 회수 시 비정상 종료 추정 문구를 이 절에 추가한다.
+
+`## 검증` 표:
+
+```text
+| at | commit | criteria | command | exit | limits |
+|---|---|---|---|---|---|
+| <시각> | <HEAD 또는 -> | <완료 기준 해시> | <명령> | <종료 코드> | <한계> |
+```
+
+`criteria`는 완료 기준 절의 SHA-1 앞 8자리다. Git 저장소 경로가 없으면 commit은 `-`다. `end --done --unverified`는 command·exit를 `-`, limits를 `미검증: <사유>`로 기록한다.
+
+`decisions.md`는 `| ID | 상태 | 생성 | 제목 | 내용 | 대체 |` 6열이다. 상태는 `승인|대체|폐기`다. 내용 합계가 300자를 넘으면 행에는 첫 문장과 `decisions/D<n>.md` 경로만 두고, 상세 파일에 문맥·결정·대안·결과와 `supersedes`, `decider`를 기록한다.
+
+`facts.md` 상태는 `Active|Closed`, `backlog.md` 상태는 `Active|Done|Dropped`다. 목록 행은 삭제하지 않고 `set --status`로 전이한다.
+
+## 명령
+
+| 명령 | 인자와 핵심 동작 |
 |---|---|
-| `new <slug> --goal <text> [--label <x>...]` | 프로젝트·목록·resources·`_default` 생성, `projects.md`와 생성물 갱신 |
-| `resume <slug>` | `sync` 후 `RESUME.md` 출력 |
-| `add work <title> [--class <name>] [--goal <text>]` | 다음 `WorkN` 발급 |
-| `add item <parent-id> <title> [--kind <kind>] [--verify <command>]` | 부모 체인의 다음 순번 Item 발급 |
-| `add fact <text> [--ref <id>]` | `F<n>` 행 발급 |
-| `add decision <text> --from <a> --to <b> --why <reason> [--decider <name>]` | `D<n>` 행 발급 |
-| `add backlog <text> --kind req|todo|plan|issue|bug` | `B<n>` 행 발급 |
+| `new` | `<slug> --goal <text> [--label <x>]`; 프로젝트와 기본 트리 생성 |
+| `resume` | `<slug>`; 목록 자동 압축 뒤 RESUME 재생성·출력 |
+| `add` | `work|item|fact|backlog`; ID를 발급하며 RESUME는 즉시 갱신하지 않음 |
+| `decide` | `<title> --context --decision [--alt --result --supersedes --decider]`; 승인 결정 기록 |
+| `set` | `<ID> --status [--why]` 또는 `<item-id> --blocked-by|--unblock` |
+| `start` | `<item-id> [--note] [--delegate] [--worktree]`; 점유·상태 승격·기준 commit 기록 |
+| `note` | `<item-id> --did --next [--watch --wait --unverified]`; 재개·heartbeat 갱신 |
+| `verify` | `<item-id> --cmd (--exit N|--run) [--cwd --limit]`; 검증 행·worklog 기록 |
+| `end` | Item 완료·중지·실패·취소, `--all --pause`, 프로젝트 `--done --confirm` |
+| `lock` | `acquire|beat|release|list|reap [id] [--repo <path>]...`; Item·저장소 lock 관리 |
+| `find` | `[query] [--chain D<n>]`; 원본·archive·worklog 검색 또는 결정 계보 출력 |
+| `doctor` | `[--scope <classification>]`; 무결성 fail·warn 출력 |
+| `sync` | 숨김 명령. RESUME와 projects 색인을 재생성 |
+| `compact` | 숨김 명령. 8,000자 초과 목록의 종료 상태 행을 archive로 이동 |
 
-## 실행 수명주기
+`start --delegate`는 범위·완료 기준·frontmatter `verify`가 모두 있어야 한다. `end --done`은 결과와 현재 HEAD·완료 기준에 맞는 성공 검증이 필요하며, 없으면 `--unverified <사유>`가 필요하다. 완료 기준이 비어 있어도 미검증 사유가 필요하다. 자식이 Planned 또는 In Progress면 완료할 수 없다.
 
-`start <id> [--note <text>] [--delegate] [--worktree <path>]`는 원자 lock, 상태 승격, worklog 착수, `sync`, 실행 컨텍스트 출력을 묶는다. 중간 실패 시 문서 변경과 새 worklog를 되돌리고 lock을 해제한다.
+## 종료 코드
 
-`note <id> --did <text> --next <text> [--watch <text>] [--wait <text>] [--unverified <text>]`는 `## 재개`를 덮어쓰고 heartbeat와 worklog 체크포인트를 갱신한다.
+| 코드 | 의미 |
+|---|---|
+| 0 | 성공. `verify --run`의 대상 명령 실패도 기록 성공이면 0 |
+| 1 | lock 실패 또는 doctor fail |
+| 2 | 필수 입력·게이트·상태 전이 위반 |
+| 3 | 처리하지 못한 예외 |
 
-`end` 모드:
+## RESUME 예산
 
-- `--done --result <text> [--evidence <path>...]`: 결과·증거 기록, Done, 부모 자동 Done, worklog 완료 이동, lock 해제, sync, scoped doctor, times append.
-- `--pause [--did <text> --next <text>]`: 재개 블록이 60분보다 낡거나 비었으면 보강 없이는 종료 코드 2. 상태는 In Progress 유지.
-- `--fail --cause <text> --fix <text>`: 실패와 처방을 재개·worklog에 기록하고 lock 해제.
-- `--skip --reason <text>`: 자식 없는 단위를 Canceled로 바꾸고 `canceled/`로 이동, 활성 관계를 해소한다. 자식이 있으면 먼저 자식을 완료하거나 skip해야 한다.
-- `end --all --pause`: 현재 session이 가진 모든 Item에 pause 적용.
+전체는 4,500자 이하다. 요약은 Goal과 지표 2줄, 점유는 3행, 이어받을 In Progress Item은 3건·재개 블록 400자, 외부 대기는 3건, 착수 가능은 5건, 승인 결정과 Active 사실은 각각 최근 3건·행당 150자, 최근 결과는 2건·결과 첫 줄 120자, 주의는 fail 우선 3건이다.
 
-종료 코드: 성공 0, lock 또는 검색 실패 1, 필수 입력·위임 게이트 실패 2, 무결성 fail 1.
+4,500자를 넘으면 같은 데이터를 순서대로 다시 렌더한다.
 
-## 생성물과 조회
+1. 재개 블록 400자에서 200자로 축소
+2. 결정·사실 3건에서 2건으로 축소
+3. 착수 가능 5건에서 3건으로 축소
 
-- `sync`: `graph.md`, `graph.json`, `Doing.md`, `RESUME.md`, `index.md`, `projects.md`를 다시 만든다. `__index` lock으로 직렬화하며 짧은 동시 실행은 제한 시간 안에서 대기한다.
-- `graph roots|blocked|children|parents|ancestors|descendants|orphans [id]`: 원본 전체 대신 계보와 차단 관계를 조회한다.
-- `find <ID-or-keyword>`: 활성 목록, `archive/`, Work·Item, worklog를 검색한다.
-- `compact`: 활성 목록이 8000자를 넘으면 Done·Canceled 행을 같은 이름의 `archive/` 문서로 옮긴다. ID와 원문을 보존한다.
+마지막 줄의 `축소 적용:` 값이 적용 단계를 나타낸다. 전체 문서를 임의 위치에서 자르지 않는다.
 
-`RESUME.md`는 30초 요약, 점유 중, In Progress 재개 블록, 외부 대기, 착수 가능 최대 10개, 최근 결정·사실, 최근 worklog 결과, doctor 경고 순서다. 6000자를 넘으면 긴 항목 본문을 파일 링크로 줄인다.
+## 세션과 체크포인트
 
-## Lock
+`--session`과 `PMT_SESSION`이 없으면 Linux `/proc/<ppid>/stat`에서 조부모 PID를 읽어 `pid-<gppid>`를 만든다. 실패하면 `session-<ppid>`를 쓰고 lock 존재만으로 소유를 완화하며 경고한다. 같은 실행기 아래 서브에이전트는 세션 ID가 같으므로 PMT 문서와 lock을 직접 다루지 않는다.
 
-`lock acquire|beat|release|list|reap <id>`는 프로젝트 `.locks/`의 디렉터리 생성 원자성을 사용한다. stale 기준은 30분이다. `reap`은 마지막 `note` 위에 비정상 종료 추정 문구를 넣고 회수 이력을 남긴다.
+`add` 결과는 다음 `start`, `note`, `end`, `resume`의 sync에서 RESUME에 반영된다. 내 Item heartbeat가 20분을 넘으면 모든 명령이 stderr 첫 줄에 체크포인트 경고를 낸다. 다른 Item의 heartbeat가 30분을 넘으면 `start` 전이 게이트가 막는다. 대상 lock이 30분을 넘으면 `start`가 그 한 건을 회수하고 재개 절에 비정상 종료 추정 문구를 남긴다.
 
-저장소 병합 lock은 `--repo <absolute-or-resolved-path>`를 사용하며 `<docs-root>/.repo-locks/`에 분리한다. 저장소가 여러 개면 정규화 절대 경로 오름차순으로 획득한다.
+## doctor
 
-## Doctor
+Fail: 필수 frontmatter 누락, ID와 경로 불일치, parent 누락, 존재하지 않는 내부 `blocked_by`, Item 깊이 초과, test Item의 자식, 부모 순환, 목록 ID 중복, `next_id` 역행, facts·decisions·backlog의 허용 밖 상태.
 
-Fail: 필수 frontmatter, id와 경로, parent 존재, 활성 관계 대상, 깊이·test 자식, 부모 순환, 목록 ID·`next_id`.
+Warn: 24시간 넘었거나 없는 In Progress Item 재개 블록, stale lock, `handoff-*.md`, `RESUME.md` 누락. 읽기 실패는 stderr에 경고한다. 출력 요약은 `doctor: fail N, warn N` 형식이다.
 
-Warn: stale lock, 24시간 넘은 In Progress 재개 블록, `handoff-*.md`, resources·생성물·자체 완결성 부족.
+## 원격 경계
 
-## 원격 경계와 close
-
-PMT 로컬 엔진은 특정 Linear 클라이언트나 자격 증명을 내장하지 않는다. 에이전트가 사용 가능한 공식 커넥터로 사용자 명시 요청 시 upsert하고 반환 ID를 frontmatter에 기록한다. `close <slug> --confirm [--remote-synced]`는 사용자 허가를 나타내는 `--confirm`이 필수다. 원격 대상이 구성됐는데 `--remote-synced`가 없으면 종료하지 않는다. push·배포는 수행하지 않는다.
+엔진에는 Linear·업무보고 같은 원격 클라이언트와 자격 증명이 없다. 원격 쓰기와 push·배포는 사용자 명시 요청을 받은 에이전트 커넥터의 책임이다.

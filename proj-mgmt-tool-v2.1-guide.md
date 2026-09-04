@@ -94,7 +94,7 @@
 - 스타일: 기존 `pmt.py` 관례 유지 — 함수형 `cmd_*`, `PmtError`로 종료 코드 전달, `read_doc/write_doc/section_text/replace_section` 재사용. 새 헬퍼는 기존 헬퍼 근처에 둔다. 주석은 기존 밀도(거의 없음) 유지.
 - 테스트: `tests/`는 `unittest`, `run_pmt()` 헬퍼(subprocess) 패턴 유지. 임시 `PMT_DOCS_ROOT`만 사용. `sleep` 금지 — 시간 의존은 `lock.json`의 `heartbeat`를 과거로 직접 수정.
 - 종료 코드: `0` 성공 / `1` lock 실패·doctor fail / `2` 필수 입력·게이트·전이 규칙 위반 / `3` 예기치 못한 예외(stderr 1줄).
-- 한 단계씩. 단계 완료 조건: `python scripts/validate_skill.py && python -m unittest discover -s tests -v` 전부 통과. 통과 후 커밋 1개(`pmt: N단계 <요지>`), §7 형식 보고, **다음 단계는 지시받기 전 착수 금지**.
+- 한 단계씩. 단계 완료 조건: `python scripts/validate_skill.py && python -m unittest discover -s tests -v` 전부 통과. 통과 후 §7 형식 보고, **다음 단계는 지시받기 전 착수 금지**. 커밋은 검수자(Claude)가 수행한다 — 구현자는 sandbox에서 `.git` 쓰기가 불가하므로 git 쓰기 명령을 시도하지 않고 §7 "커밋" 항목에 제안 메시지만 적는다. 실행 인터프리터는 `python3`.
 - 모르는 것은 추정하지 말고 보고서 "질문" 항목에 적는다.
 
 ### §1. 데이터 형식 (최종 명세)

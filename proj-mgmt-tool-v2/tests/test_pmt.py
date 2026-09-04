@@ -139,7 +139,7 @@ class PmtTest(unittest.TestCase):
         self.run_pmt("--project", slug, "end", item, "--done", "--result", "completed parser", "--unverified", "test")
         work_text = (self.docs / "projects" / slug / "_default" / "Work1.md").read_text(encoding="utf-8")
         self.assertIn("status: Done", work_text)
-        self.assertRegex(self.run_pmt("--project", slug, "doctor").stdout, r"(0 fail|fail: 0)")
+        self.assertIn("doctor: fail 0", self.run_pmt("--project", slug, "doctor").stdout)
 
     def test_end_all_pause_releases_session_locks(self):
         slug, work, item_one = self.make_item()
@@ -154,7 +154,7 @@ class PmtTest(unittest.TestCase):
         doctor = self.run_pmt("--project", slug, "doctor").stdout
 
         self.assertNotIn(SESSION, locks)
-        self.assertRegex(doctor, r"(0 fail|fail: 0)")
+        self.assertIn("doctor: fail 0", doctor)
 
     def test_compact_preserves_find_for_archived_rows(self):
         slug, _work, _item = self.make_item()
@@ -904,7 +904,17 @@ class PmtTest(unittest.TestCase):
 
         slug, _work, item = self.make_item(slug="done-empty")
         self.run_pmt("--project", slug, "start", item)
-        empty = self.run_pmt("--project", slug, "end", item, "--done", "--result", "empty allowed")
+        empty = self.run_pmt(
+            "--project",
+            slug,
+            "end",
+            item,
+            "--done",
+            "--result",
+            "empty allowed",
+            "--unverified",
+            "empty criteria",
+        )
         self.assertEqual(empty.returncode, 0)
         self.assertIn("경고: 완료 기준 비어 있음", empty.stderr)
 
@@ -956,6 +966,7 @@ class PmtTest(unittest.TestCase):
         self.assertIn("## 주의", resume)
         self.assertIn("축소 적용:", resume)
         self.assertIn("실제 결과 한 줄", resume)
+        self.assertIn(f"- {worklog.name}: 실제 결과 한 줄", resume)
         self.assertNotIn("RESUME length trimmed", resume)
 
     def test_resume_shows_external_waits_and_hides_blocked_from_startable(self):
@@ -1014,6 +1025,50 @@ class PmtTest(unittest.TestCase):
         self.assertIn("status: Done", project.read_text(encoding="utf-8"))
         self.assertIn(f"| {slug} | Done |", projects.read_text(encoding="utf-8"))
         self.assertIn(f"프로젝트 종료: {slug}", closed.stdout)
+
+    def test_done_gate_requires_unverified_when_criteria_empty(self):
+        slug, _work, item = self.make_item(slug="empty-gate")
+        item_path = self.docs / "projects" / slug / "_default" / "Work1-1.md"
+        self.run_pmt("--project", slug, "start", item)
+
+        rejected = self.run_pmt(
+            "--project", slug, "end", item, "--done", "--result", "blocked", ok=False
+        )
+        accepted = self.run_pmt(
+            "--project",
+            slug,
+            "end",
+            item,
+            "--done",
+            "--result",
+            "accepted",
+            "--unverified",
+            "no criteria",
+        )
+
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("--unverified", rejected.stderr)
+        self.assertEqual(accepted.returncode, 0)
+        self.assertIn("| - | - | - | 미검증: no criteria |", item_path.read_text(encoding="utf-8"))
+
+    def test_base_commit_is_dash_without_repository(self):
+        slug, _work, item = self.make_item(slug="base-dash")
+        item_path = self.docs / "projects" / slug / "_default" / "Work1-1.md"
+
+        started = self.run_pmt("--project", slug, "start", item)
+
+        self.assertIn("base_commit: -", item_path.read_text(encoding="utf-8"))
+        self.assertIn("criteria -", started.stdout)
+
+    def test_doctor_does_not_warn_resume_for_project_or_work(self):
+        slug, work, item = self.make_item(slug="doctor-resume")
+        self.run_pmt("--project", slug, "start", item)
+
+        result = self.run_pmt("--project", slug, "doctor")
+
+        self.assertIn(f"WARN {item}: resume block older than 24h or missing", result.stdout)
+        self.assertNotIn(f"WARN {slug}: resume block older than 24h or missing", result.stdout)
+        self.assertNotIn(f"WARN {work}: resume block older than 24h or missing", result.stdout)
 
     def test_parallel_sync_writes_resume_and_doctor_passes(self):
         slug, _work, _item = self.make_item()

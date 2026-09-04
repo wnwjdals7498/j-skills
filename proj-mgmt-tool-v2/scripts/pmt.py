@@ -21,7 +21,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-
 LIST_FILES = ("facts.md", "decisions.md", "backlog.md")
 GENERATED = {"RESUME.md"}
 SKIP_DIRS = {"archive", "canceled", "resources", ".locks", ".migration-v1-backup", "decisions"}
@@ -257,7 +256,6 @@ def scan_docs(project_dir: Path) -> Dict[str, Dict[str, Any]]:
             "path": str(path),
             "body": body,
             "frontmatter": fm,
-            "id": fm.get("id"),
             "type": fm.get("type"),
             "kind": fm.get("kind"),
             "status": fm.get("status"),
@@ -288,9 +286,8 @@ def project_indexes(ctx: Context) -> None:
         if not path.exists():
             continue
         fm, _ = read_doc(path)
-        rows.append(
-            f"| {project.name} | {fm.get('status', '')} | {fm.get('updated', '')} | {', '.join(as_list(fm.get('labels')))} |"
-        )
+        labels = ", ".join(as_list(fm.get("labels")))
+        rows.append(f"| {project.name} | {fm.get('status', '')} | {fm.get('updated', '')} | {labels} |")
     (ctx.projects_root / "projects.md").write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
@@ -330,7 +327,6 @@ def cmd_new(ctx: Context, args: argparse.Namespace) -> int:
     for name in LIST_FILES:
         (project_dir / name).write_text(list_template(name[:-3], slug), encoding="utf-8")
     sync(ctx, project_dir)
-    project_indexes(ctx)
     print(f"created {slug}")
     return 0
 
@@ -363,7 +359,8 @@ def cmd_add(ctx: Context, args: argparse.Namespace) -> int:
     if args.add_kind == "work":
         class_name = args.class_name or "_default"
         reserved = {"archive", "canceled", "resources", "decisions", ".locks"}
-        if class_name in reserved or class_name.startswith(".") or (class_name.startswith("_") and class_name != "_default"):
+        private = class_name.startswith("_") and class_name != "_default"
+        if class_name in reserved or class_name.startswith(".") or private:
             raise PmtError(f"reserved classification: {class_name}", 2)
         name = next_work_id(project_dir, class_name)
         item_id = f"{ctx.require_project()}/{class_name}/{name}"
@@ -372,7 +369,14 @@ def cmd_add(ctx: Context, args: argparse.Namespace) -> int:
             f"# {name}: {args.title}\n## Goal\n- {args.goal or args.title}\n"
             "## 결과\n-\n## 증거\n-\n"
         )
-        write_doc(id_to_path(project_dir, item_id), {"type": "work", "id": item_id, "parent": parent, "status": "Planned", "updated": today()}, body)
+        data = {
+            "type": "work",
+            "id": item_id,
+            "parent": parent,
+            "status": "Planned",
+            "updated": today(),
+        }
+        write_doc(id_to_path(project_dir, item_id), data, body)
         print(item_id)
         return 0
     if args.add_kind == "item":
@@ -392,7 +396,16 @@ def cmd_add(ctx: Context, args: argparse.Namespace) -> int:
             f"# [{args.kind}] {args.title}\n## 기본 내용\n-\n## 범위\n- [ ]\n"
             "## 완료 기준\n-\n## 재개\n<start 이후 note가 채움>\n## 결과\n-\n## 증거\n-\n"
         )
-        data = {"type": "item", "kind": args.kind, "id": item_id, "parent": parent_id, "status": "Planned", "blocked_by": [], "base_commit": "-", "updated": today()}
+        data = {
+            "type": "item",
+            "kind": args.kind,
+            "id": item_id,
+            "parent": parent_id,
+            "status": "Planned",
+            "blocked_by": [],
+            "base_commit": "-",
+            "updated": today(),
+        }
         if args.verify:
             data["verify"] = args.verify
         write_doc(id_to_path(project_dir, item_id), data, body)
@@ -433,18 +446,6 @@ def escape_cell(text: str) -> str:
 
 
 def insert_table_row(body: str, row: str) -> str:
-    header = table_header(body)
-    cells = split_table_row(row)
-    if header == ["ID", "상태", "생성", "내용"] and len(cells) == 4:
-        cells[1] = {"Done": "Closed", "Canceled": "Closed", "Planned": "Active", "In Progress": "Active"}.get(cells[1], cells[1])
-        row = join_table_row(cells)
-    elif header == ["ID", "상태", "생성", "제목", "내용", "대체"] and len(cells) == 4:
-        cells[1] = {"Done": "승인", "Canceled": "폐기", "Planned": "승인", "In Progress": "승인", "Active": "승인"}.get(cells[1], cells[1])
-        cells = [cells[0], cells[1], cells[2], cells[3], cells[3], ""]
-        row = join_table_row(cells)
-    elif header == ["ID", "kind", "상태", "생성", "내용"] and len(cells) == 5:
-        cells[2] = {"Planned": "Active", "In Progress": "Active", "Canceled": "Dropped"}.get(cells[2], cells[2])
-        row = join_table_row(cells)
     lines = body.splitlines()
     insert_at = len(lines)
     for i, line in enumerate(lines):
@@ -517,15 +518,30 @@ def cmd_decide(ctx: Context, args: argparse.Namespace) -> int:
         fm, body = read_doc(path)
         status_index = table_header(body).index("상태")
         previous = find_table_row(body, args.supersedes) if args.supersedes else None
-        if args.supersedes and (not re.fullmatch(r"D\d+", args.supersedes) or not previous or previous[status_index] != "승인"):
+        invalid_previous = args.supersedes and (
+            not re.fullmatch(r"D\d+", args.supersedes)
+            or not previous
+            or previous[status_index] != "승인"
+        )
+        if invalid_previous:
             raise PmtError(f"supersedes target must be approved: {args.supersedes}", 2)
         number = int(fm.get("next_id") or 1)
         decision_id = f"D{number}"
         values = (("문맥", args.context), ("결정", args.decision), ("대안", args.alt), ("결과", args.result))
         content = " / ".join(f"{name}: {value}" for name, value in values if value)
         if len(content) > 300:
-            decision_body = "\n".join([f"# {args.title}"] + [f"## {name}\n{value or '-'}" for name, value in values]) + "\n"
-            write_doc(project_dir / "decisions" / f"{decision_id}.md", {"type": "decision", "id": f"{project_dir.name}/{decision_id}", "status": "승인", "supersedes": args.supersedes, "created": today(), "decider": args.decider or ctx.session}, decision_body)
+            sections = [f"## {name}\n{value or '-'}" for name, value in values]
+            decision_body = "\n".join([f"# {args.title}"] + sections) + "\n"
+            decision_data = {
+                "type": "decision",
+                "id": f"{project_dir.name}/{decision_id}",
+                "status": "승인",
+                "supersedes": args.supersedes,
+                "created": today(),
+                "decider": args.decider or ctx.session,
+            }
+            decision_path = project_dir / "decisions" / f"{decision_id}.md"
+            write_doc(decision_path, decision_data, decision_body)
             summary = re.split(r"(?<=[.!?])\s+|\n+", args.decision.strip(), maxsplit=1)[0]
             content = f"결정: {summary} (전문: decisions/{decision_id}.md)"
         row = [decision_id, "승인", today(), escape_cell(args.title), escape_cell(content), args.supersedes or ""]
@@ -544,7 +560,12 @@ def cmd_decide(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def set_list_status(ctx: Context, args: argparse.Namespace, prefix: str) -> int:
-    file_name, transitions = {"F": ("facts.md", {"Active": {"Closed"}}), "B": ("backlog.md", {"Active": {"Done", "Dropped"}}), "D": ("decisions.md", {"승인": {"폐기"}})}[prefix]
+    specs = {
+        "F": ("facts.md", {"Active": {"Closed"}}),
+        "B": ("backlog.md", {"Active": {"Done", "Dropped"}}),
+        "D": ("decisions.md", {"승인": {"폐기"}}),
+    }
+    file_name, transitions = specs[prefix]
     project_dir = ctx.project_dir()
     path = project_dir / file_name
     lock_id = f"__list-{file_name}"
@@ -638,11 +659,6 @@ def lock_meta(base: Path, item_id: str) -> Optional[Dict[str, Any]]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def lock_owned(base: Path, item_id: str, session: str) -> bool:
-    meta = lock_meta(base, item_id)
-    return bool(meta and meta.get("session") == session)
-
-
 def require_lock_owner(base: Path, item_id: str, ctx: Context) -> None:
     if not ctx.session_stable:
         if not ctx.session_warning_emitted:
@@ -650,7 +666,8 @@ def require_lock_owner(base: Path, item_id: str, ctx: Context) -> None:
             ctx.session_warning_emitted = True
         if (base / lock_name(item_id)).exists():
             return
-    if not lock_owned(base, item_id, ctx.session):
+    meta = lock_meta(base, item_id)
+    if not meta or meta.get("session") != ctx.session:
         raise PmtError(f"lock not owned by session: {item_id}", 1)
 
 
@@ -725,26 +742,38 @@ def criteria_hash(body: str) -> str:
 
 
 def git_head(cwd: Optional[Path]) -> str:
-    if cwd is None: return "-"
+    if cwd is None:
+        return "-"
     try:
-        proc = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--short", "HEAD"], text=True, capture_output=True, timeout=10)
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--short", "HEAD"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
         return proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else "-"
     except Exception:
         return "-"
 
 
-def verify_cwd(ctx: Context, project_dir: Path, arg: Optional[str]) -> Path:
+def verify_cwd(ctx: Context, project_dir: Path, arg: Optional[str]) -> Optional[Path]:
     value = arg or next(iter(as_list(read_doc(project_dir / "project.md")[0].get("repositories"))), None)
-    return Path(value).expanduser().resolve() if value else Path.cwd()
+    return Path(value).expanduser().resolve() if value else None
 
 
 def verification_rows(body: str) -> List[List[str]]:
-    return [split_table_row(line) for line in section_text(body, "검증").splitlines() if line.startswith("| ") and not line.startswith("| at ") and not line.startswith("|---")]
+    lines = section_text(body, "검증").splitlines()
+    return [
+        split_table_row(line)
+        for line in lines
+        if line.startswith("| ") and not line.startswith("| at ") and not line.startswith("|---")
+    ]
 
 
 def append_verification(body: str, row: str) -> str:
     current = section_text(body, "검증")
-    if current: return replace_section(body, "검증", f"{current}\n{row}")
+    if current:
+        return replace_section(body, "검증", f"{current}\n{row}")
     block = f"## 검증\n| at | commit | criteria | command | exit | limits |\n|---|---|---|---|---|---|\n{row}\n"
     return body.replace("## 결과\n", block + "## 결과\n", 1) if "## 결과\n" in body else body.rstrip() + "\n\n" + block
 
@@ -765,13 +794,13 @@ def worklog_path(ctx: Context, item_id: str) -> Path:
     return ctx.worklog_root / f"{slug}__{class_name}__{name}.md"
 
 
-def unique_path(path: Path) -> Path:
+def unique_path(path: Path, separator: str = "-", start: int = 1) -> Path:
     if not path.exists():
         return path
     stem = path.stem
     suffix = path.suffix
-    for number in range(1, 1000):
-        candidate = path.with_name(f"{stem}-{number}{suffix}")
+    for number in range(start, 1000):
+        candidate = path.with_name(f"{stem}{separator}{number}{suffix}")
         if not candidate.exists():
             return candidate
     raise PmtError(f"cannot allocate archive path for {path}", 1)
@@ -783,7 +812,10 @@ def append_worklog(ctx: Context, item_id: str, heading: str, lines: Sequence[str
     if not path.exists():
         text = (
             "---\n"
-            f"title: {item_id}\nstatus: Active\nissues: [{item_id}]\ncomponents: [{item_id.split('/')[1] if '/' in item_id else '_default'}]\n"
+            f"title: {item_id}\n"
+            "status: Active\n"
+            f"issues: [{item_id}]\n"
+            f"components: [{item_id.split('/')[1] if '/' in item_id else '_default'}]\n"
             f"created: {today()}\n---\n"
             f"# {item_id}\n"
         )
@@ -877,7 +909,12 @@ def cmd_start(ctx: Context, args: argparse.Namespace) -> int:
         fm["updated"] = today()
         write_doc(path, fm, body)
         promote_parents(project_dir, item_id)
-        append_worklog(ctx, item_id, "착수", [f"session: {ctx.session}", f"note: {args.note or ''}", f"worktree: {args.worktree or ''}"])
+        append_worklog(
+            ctx,
+            item_id,
+            "착수",
+            [f"session: {ctx.session}", f"note: {args.note or ''}", f"worktree: {args.worktree or ''}"],
+        )
         sync(ctx, project_dir)
     except Exception:
         for doc_path, original in backup_docs.items():
@@ -907,10 +944,20 @@ def print_context(ctx: Context, path: Path, item_id: str) -> None:
     head, criteria = git_head(verify_cwd(ctx, ctx.project_dir(), None)), criteria_hash(body)
     success = next((row for row in reversed(rows) if len(row) >= 5 and row[4] == "0"), None)
     last = f"마지막 {rows[-1][1]}/{rows[-1][2]} exit {rows[-1][4]} @{rows[-1][0]}" if rows else "없음"
-    print(f"검증: {last} → 현재 HEAD {head} / criteria {criteria} → 재검증 {'불필요' if success and success[1:3] == [head, criteria] else '필요'}")
+    criteria_label = criteria or "-"
+    state = "불필요" if success and success[1:3] == [head, criteria] else "필요"
+    print(f"검증: {last} → 현재 HEAD {head} / criteria {criteria_label} → 재검증 {state}")
 
 
-def write_resume_block(path: Path, session: str, did: str, next_step: str, watch: Optional[str], wait: Optional[str], unverified: Optional[str]) -> None:
+def write_resume_block(
+    path: Path,
+    session: str,
+    did: str,
+    next_step: str,
+    watch: Optional[str],
+    wait: Optional[str],
+    unverified: Optional[str],
+) -> None:
     fm, body = read_doc(path)
     block = [
         f"- 갱신: {timestamp()} (session {session})",
@@ -943,7 +990,12 @@ def cmd_note(ctx: Context, args: argparse.Namespace) -> int:
     require_lock_owner(project_lock_base(project_dir), args.item_id, ctx)
     write_resume_block(path, ctx.session, args.did, args.next_step, args.watch, args.wait, args.unverified)
     update_lock(project_lock_base(project_dir), args.item_id, ctx.session)
-    append_worklog(ctx, args.item_id, "체크포인트", [f"한 것: {args.did}", f"다음: {args.next_step}", f"주의: {args.watch or '없음'}"])
+    append_worklog(
+        ctx,
+        args.item_id,
+        "체크포인트",
+        [f"한 것: {args.did}", f"다음: {args.next_step}", f"주의: {args.watch or '없음'}"],
+    )
     sync(ctx, project_dir)
     print(f"noted {args.item_id}")
     return 0
@@ -953,23 +1005,36 @@ def cmd_verify(ctx: Context, args: argparse.Namespace) -> int:
     project_dir = ctx.project_dir()
     path = id_to_path(project_dir, args.item_id)
     fm, body = read_doc(path)
-    if fm.get("type") != "item": raise PmtError("verify target must be an item", 2)
+    if fm.get("type") != "item":
+        raise PmtError("verify target must be an item", 2)
     require_lock_owner(project_lock_base(project_dir), args.item_id, ctx)
     criteria = criteria_hash(body)
-    if not criteria: raise PmtError("완료 기준 비어 있음", 2)
-    if bool(args.run) == (args.exit_code is not None): raise PmtError("choose exactly one of --run or --exit", 2)
+    if not criteria:
+        raise PmtError("완료 기준 비어 있음", 2)
+    if bool(args.run) == (args.exit_code is not None):
+        raise PmtError("choose exactly one of --run or --exit", 2)
     cwd = verify_cwd(ctx, project_dir, args.cwd)
     exit_code = args.exit_code
     if args.run:
         try:
-            exit_code = subprocess.run(args.cmd, shell=True, cwd=str(cwd), capture_output=True, timeout=600).returncode
+            run_cwd = cwd or Path.cwd()
+            exit_code = subprocess.run(
+                args.cmd,
+                shell=True,
+                cwd=str(run_cwd),
+                capture_output=True,
+                timeout=600,
+            ).returncode
         except subprocess.TimeoutExpired:
             exit_code = 124
     commit = git_head(cwd)
-    row = join_table_row([timestamp(), commit, criteria, escape_cell(args.cmd), str(exit_code), escape_cell(args.limit or "")])
+    row = join_table_row(
+        [timestamp(), commit, criteria, escape_cell(args.cmd), str(exit_code), escape_cell(args.limit or "")]
+    )
     fm["updated"] = today()
     write_doc(path, fm, append_verification(body, row))
-    append_worklog(ctx, args.item_id, "검증", [f"{args.cmd} exit {exit_code} @{commit}{f' {args.limit}' if args.limit else ''}"])
+    limit = f" {args.limit}" if args.limit else ""
+    append_worklog(ctx, args.item_id, "검증", [f"{args.cmd} exit {exit_code} @{commit}{limit}"])
     update_lock(project_lock_base(project_dir), args.item_id, ctx.session)
     sync(ctx, project_dir)
     print(row)
@@ -1030,13 +1095,33 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
         if incomplete:
             raise PmtError("cannot complete with unfinished children: " + ", ".join(incomplete), 2)
         criteria, head = criteria_hash(body), git_head(verify_cwd(ctx, project_dir, None))
-        if fm.get("type") == "item" and not criteria: print("경고: 완료 기준 비어 있음", file=sys.stderr)
-        elif fm.get("type") == "item" and not any(len(row) >= 5 and row[1:3] == [head, criteria] and row[4] == "0" for row in verification_rows(body)):
-            if not args.unverified: raise PmtError(f"pmt verify {args.item_id} --cmd ... 또는 --unverified <사유>", 2)
-            row = join_table_row([timestamp(), head, criteria, "-", "-", escape_cell(f"미검증: {args.unverified}")])
-            body = append_verification(body, row)
+        if fm.get("type") == "item":
+            if not criteria:
+                print("경고: 완료 기준 비어 있음", file=sys.stderr)
+            matched = criteria and any(
+                len(row) >= 5 and row[1:3] == [head, criteria] and row[4] == "0"
+                for row in verification_rows(body)
+            )
+            if not matched:
+                if not args.unverified:
+                    raise PmtError(
+                        f"pmt verify {args.item_id} --cmd ... 또는 --unverified <사유>",
+                        2,
+                    )
+                row = join_table_row(
+                    [
+                        timestamp(),
+                        head,
+                        criteria or "-",
+                        "-",
+                        "-",
+                        escape_cell(f"미검증: {args.unverified}"),
+                    ]
+                )
+                body = append_verification(body, row)
         for evidence in args.evidence or []:
-            if not Path(evidence).exists(): print(f"경고: evidence 없음: {evidence}", file=sys.stderr)
+            if not Path(evidence).exists():
+                print(f"경고: evidence 없음: {evidence}", file=sys.stderr)
         body = replace_section(body, "결과", f"- {args.result}")
         if args.evidence:
             body = replace_section(body, "증거", "\n".join(f"- {x}" for x in args.evidence))
@@ -1126,16 +1211,8 @@ def move_worklog_done(ctx: Context, item_id: str) -> None:
     src = worklog_path(ctx, item_id)
     if not src.exists():
         return
-    dst = ctx.worklog_root / "done" / src.name
+    dst = unique_path(ctx.worklog_root / "done" / src.name, separator="__", start=2)
     ensure_dir(dst.parent)
-    if dst.exists():
-        suffix = 2
-        while True:
-            candidate = dst.with_name(f"{dst.stem}__{suffix}{dst.suffix}")
-            if not candidate.exists():
-                dst = candidate
-                break
-            suffix += 1
     src.replace(dst)
 
 
@@ -1188,10 +1265,6 @@ def auto_done_parents(project_dir: Path, item_id: str) -> None:
             return
 
 
-def build_graph(project_dir: Path) -> Dict[str, Any]:
-    return {"nodes": scan_docs(project_dir)}
-
-
 def parent_exists(project_dir: Path, nodes: Dict[str, Dict[str, Any]], parent: Any) -> bool:
     if not parent:
         return True
@@ -1208,11 +1281,13 @@ def sync(ctx: Context, project_dir: Path) -> None:
     if not acquire_lock_wait(project_lock_base(project_dir), index_id, ctx.session):
         raise PmtError("index lock busy", 1)
     try:
-        graph = build_graph(project_dir)
-        (project_dir / "RESUME.md").write_text(render_resume(ctx, project_dir, graph), encoding="utf-8")
+        nodes = scan_docs(project_dir)
+        resume = render_resume(ctx, project_dir, nodes)
+        (project_dir / "RESUME.md").write_text(resume, encoding="utf-8")
         project_indexes(ctx)
     finally:
         release_lock(project_lock_base(project_dir), index_id, ctx.session)
+
 
 def clip_lines(lines: List[str], limit: int, more: str) -> List[str]:
     return lines if len(lines) <= limit else lines[:limit] + [more]
@@ -1231,21 +1306,25 @@ def clip_text(text: str, limit: int, tail: str) -> str:
     return clipped.rstrip() + separator + tail
 
 
-def render_resume(ctx: Context, project_dir: Path, graph: Dict[str, Any]) -> str:
-    nodes = graph["nodes"]
-    locks = sorted(
-        [
-            row
-            for row in read_locks(project_lock_base(project_dir))
-            if not str(row.get("id", "")).startswith("__")
-        ],
-        key=lambda row: str(row.get("heartbeat") or ""),
-        reverse=True,
-    )
+def add_resume_section(lines: List[str], title: str, rows: List[str]) -> None:
+    lines.extend(["", title])
+    lines.extend(rows or ["- 없음"])
+
+
+def limit_rows(rows: List[str], limit: int, suffix: str = "") -> List[str]:
+    more = f"…{max(0, len(rows) - limit)}건 더{suffix}"
+    return clip_lines(rows, limit, more)
+
+
+def render_resume(ctx: Context, project_dir: Path, nodes: Dict[str, Dict[str, Any]]) -> str:
+    locks = [
+        row for row in read_locks(project_lock_base(project_dir))
+        if not str(row.get("id", "")).startswith("__")
+    ]
+    locks.sort(key=lambda row: str(row.get("heartbeat") or ""), reverse=True)
     lock_by_id = {str(row.get("id")): row for row in locks}
     in_progress = [
-        (item_id, node)
-        for item_id, node in nodes.items()
+        (item_id, node) for item_id, node in nodes.items()
         if node.get("type") == "item" and node.get("status") == "In Progress"
     ]
     in_progress.sort(
@@ -1256,33 +1335,36 @@ def render_resume(ctx: Context, project_dir: Path, graph: Dict[str, Any]) -> str
         reverse=True,
     )
     external = sorted(
-        (item_id, value[4:])
-        for item_id, node in nodes.items()
-        for value in node.get("blocked_by") or []
-        if value.startswith("ext:")
+        (item_id, value[4:]) for item_id, node in nodes.items()
+        for value in node.get("blocked_by") or [] if value.startswith("ext:")
     )
     startable = [
-        (item_id, node)
-        for item_id, node in sorted(nodes.items())
-        if node.get("type") in {"work", "item"}
-        and node.get("status") == "Planned"
+        (item_id, node) for item_id, node in sorted(nodes.items())
+        if node.get("type") in {"work", "item"} and node.get("status") == "Planned"
         and not node.get("blocked_by")
     ]
     project = nodes.get(project_dir.name)
     goal = section_text(project["body"], "Goal") if project else ""
-    project_goal = next(
-        (line.strip("- ").strip() for line in goal.splitlines() if line.strip("- ")),
-        "",
-    )
+    project_goal = next((line.strip("- ").strip() for line in goal.splitlines() if line.strip("- ")), "")
     active_work = sum(
-        1
-        for node in nodes.values()
-        if node.get("type") == "work" and node.get("status") == "In Progress"
+        node.get("type") == "work" and node.get("status") == "In Progress" for node in nodes.values()
     )
     decisions = recent_list_rows(project_dir / "decisions.md", 3, status="승인")
     facts = recent_list_rows(project_dir / "facts.md", 3, status="Active")
     results = recent_worklog(ctx, project_dir.name, 2)
     warnings, failures = doctor_collect(project_dir, nodes)
+    lock_rows = [
+        clip_text(
+            f"| {row.get('session')} | {row.get('id')} | {row.get('heartbeat')} | "
+            f"{'stale' if row.get('stale') else 'active'} |", 120, "…"
+        ) for row in locks
+    ]
+    wait_rows = [clip_text(f"- {item_id}: {value}", 120, "…") for item_id, value in external]
+    start_rows = [
+        clip_text(f"- {item_id} ({node.get('kind') or node.get('type')}) - {node.get('title')}", 120, "…")
+        for item_id, node in startable
+    ]
+    notices = [clip_text(f"- {value}", 120, "…") for value in failures + warnings]
     stages = [
         ("없음", 400, 3, 5),
         ("1단계(재개 200자)", 200, 3, 5),
@@ -1290,81 +1372,45 @@ def render_resume(ctx: Context, project_dir: Path, graph: Dict[str, Any]) -> str
         ("3단계(착수 3건)", 200, 2, 3),
     ]
     for stage, resume_limit, recent_limit, start_limit in stages:
-        lines = [
-            clip_text(f"# RESUME - {project_dir.name} 생성 {timestamp()}", 200, "…"),
-            "## 요약",
-            f"- Goal: {clip_text(project_goal, 200, '…')}",
-            (
-                f"- 활성 Work {active_work} · In Progress Item {len(in_progress)}"
-                f" · 점유 {len(locks)} · 외부 대기 {len(external)}"
-            ),
-            "",
-            "## 점유 중",
-            "| 세션 | 대상 | heartbeat | 상태 |",
-            "|---|---|---|---|",
-        ]
-        lock_rows = [
-            clip_text(
-                (
-                    f"| {row.get('session')} | {row.get('id')} | {row.get('heartbeat')}"
-                    f" | {'stale' if row.get('stale') else 'active'} |"
-                ),
-                120,
-                "…",
-            )
-            for row in locks
-        ]
-        lines.extend(
-            clip_lines(lock_rows, 3, f"…{max(0, len(lock_rows) - 3)}건 더: pmt lock list")
-            or ["- 없음"]
-        )
-        lines.extend(["", "## 이어받을 항목 (heartbeat 최신순)"])
+        handoffs = []
         for item_id, node in in_progress[:3]:
-            lines.append(clip_text(f"### {item_id} - {node.get('title')}", 120, "…"))
-            lines.append(
+            handoffs.append(clip_text(f"### {item_id} - {node.get('title')}", 120, "…"))
+            handoffs.append(
                 clip_text(
                     node.get("resume") or "- 재개 정보 없음",
                     resume_limit,
                     f"…(전문: pmt find {item_id})",
                 )
             )
-        if not in_progress:
-            lines.append("- 없음")
-        elif len(in_progress) > 3:
+        if len(in_progress) > 3:
             remaining = ", ".join(item_id for item_id, _ in in_progress[3:])
-            lines.append(clip_text(f"- 그 외 In Progress: {remaining}", 180, "…"))
-        lines.extend(["", "## 외부 대기"])
-        wait_rows = [clip_text(f"- {item_id}: {value}", 120, "…") for item_id, value in external]
-        lines.extend(clip_lines(wait_rows, 3, f"…{max(0, len(wait_rows) - 3)}건 더") or ["- 없음"])
-        lines.extend(["", "## 착수 가능 (Planned, 차단 없음)"])
-        start_rows = [
-            clip_text(
-                f"- {item_id} ({node.get('kind') or node.get('type')}) - {node.get('title')}",
-                120,
-                "…",
-            )
-            for item_id, node in startable
+            handoffs.append(clip_text(f"- 그 외 In Progress: {remaining}", 180, "…"))
+        lock_section = ["| 세션 | 대상 | heartbeat | 상태 |", "|---|---|---|---|"]
+        lock_section += limit_rows(lock_rows, 3, ": pmt lock list")
+        sections = [
+            ("## 점유 중", lock_section),
+            ("## 이어받을 항목 (heartbeat 최신순)", handoffs),
+            ("## 외부 대기", limit_rows(wait_rows, 3)),
+            (
+                "## 착수 가능 (Planned, 차단 없음)",
+                limit_rows(start_rows, start_limit),
+            ),
+            (f"## 승인 결정 최근 {recent_limit}", decisions[-recent_limit:]),
+            (f"## 사실 최근 {recent_limit}", facts[-recent_limit:]),
+            ("## 최근 결과 2", results),
+            ("## 주의", limit_rows(notices, 3, ": pmt doctor")),
         ]
-        lines.extend(
-            clip_lines(
-                start_rows,
-                start_limit,
-                f"…{max(0, len(start_rows) - start_limit)}건 더",
-            )
-            or ["- 없음"]
-        )
-        lines.extend(["", f"## 승인 결정 최근 {recent_limit}"])
-        lines.extend(decisions[-recent_limit:] or ["- 없음"])
-        lines.extend(["", f"## 사실 최근 {recent_limit}"])
-        lines.extend(facts[-recent_limit:] or ["- 없음"])
-        lines.extend(["", "## 최근 결과 2"])
-        lines.extend(results or ["- 없음"])
-        lines.extend(["", "## 주의"])
-        notices = [clip_text(f"- {value}", 120, "…") for value in failures + warnings]
-        lines.extend(
-            clip_lines(notices, 3, f"…{max(0, len(notices) - 3)}건 더: pmt doctor")
-            or ["- 없음"]
-        )
+        lines = [
+            clip_text(f"# RESUME - {project_dir.name} 생성 {timestamp()}", 200, "…"),
+            "## 요약",
+            f"- Goal: {clip_text(project_goal, 200, '…')}",
+            (
+                f"- 활성 Work {active_work} · In Progress Item {len(in_progress)} "
+                f"· 점유 {len(locks)} · 외부 대기 {len(external)}"
+            ),
+        ]
+        for title, rows in sections:
+            add_resume_section(lines, title, rows)
         lines.append(f"축소 적용: {stage}")
         text = "\n".join(lines) + "\n"
         if len(text) <= 4500:
@@ -1404,6 +1450,10 @@ def recent_worklog(ctx: Context, slug: str, limit: int) -> List[str]:
                 continue
             first = next((line.strip() for line in match.group(1).splitlines() if line.strip()), "")
             if first:
+                if first.startswith("- "):
+                    first = first[2:]
+                if first.startswith("결과: "):
+                    first = first[len("결과: ") :]
                 result = clip_text(first, 120, "…")
                 hits.append((path.stat().st_mtime, clip_text(f"- {path.name}: {result}", 180, "…")))
     return [value for _, value in sorted(hits, reverse=True)[:limit]]
@@ -1427,60 +1477,47 @@ def cmd_sync(ctx: Context, args: argparse.Namespace) -> int:
 def cmd_lock(ctx: Context, args: argparse.Namespace) -> int:
     repo_ids = sorted(str(Path(path).resolve()) for path in (args.repo or []))
     if args.lock_kind == "list":
-        bases = []
+        bases = [repo_lock_base(ctx)]
         if ctx.project and ctx.project_dir().is_dir():
-            bases.append(project_lock_base(ctx.project_dir()))
-        bases.append(repo_lock_base(ctx))
+            bases.insert(0, project_lock_base(ctx.project_dir()))
         for base in bases:
             for row in read_locks(base):
                 print(json.dumps(row, ensure_ascii=False))
         return 0
+    project_scoped = not repo_ids
+    base = project_lock_base(ctx.project_dir()) if project_scoped else repo_lock_base(ctx)
     if args.lock_kind == "reap":
-        if repo_ids:
-            return reap_locks(ctx, repo_lock_base(ctx), project_scoped=False)
-        return reap_locks(ctx, project_lock_base(ctx.project_dir()), project_scoped=True)
-    if repo_ids:
-        base = repo_lock_base(ctx)
-        if args.lock_kind == "acquire":
-            acquired = []
-            for item_id in repo_ids:
-                if not acquire_lock(base, item_id, ctx.session):
-                    for held in reversed(acquired):
-                        release_lock(base, held, ctx.session)
-                    print(f"busy {item_id}")
-                    return 1
-                acquired.append(item_id)
-            for item_id in acquired:
-                print(f"acquired {item_id}")
-            return 0
-        targets = list(reversed(repo_ids)) if args.lock_kind == "release" else repo_ids
-        results = []
-        for item_id in targets:
-            if args.lock_kind == "beat":
-                ok = update_lock(base, item_id, ctx.session)
-                print(f"{'beat' if ok else 'not-owned'} {item_id}")
-            else:
-                ok = release_lock(base, item_id, ctx.session)
-                print(f"{'released' if ok else 'not-owned'} {item_id}")
-            results.append(ok)
-        return 0 if all(results) else 1
-    base = project_lock_base(ctx.project_dir())
-    item_id = args.item_id
-    if args.lock_kind in {"acquire", "beat", "release"} and not item_id:
+        return reap_locks(ctx, base, project_scoped)
+    item_ids = repo_ids or ([args.item_id] if args.item_id else [])
+    if not item_ids:
         raise PmtError("lock id or --repo is required", 2)
     if args.lock_kind == "acquire":
-        ok = acquire_lock(base, item_id, ctx.session)
-        print("acquired" if ok else "busy")
-        return 0 if ok else 1
-    if args.lock_kind == "beat":
-        ok = update_lock(base, item_id, ctx.session)
-        print("beat" if ok else "not-owned")
-        return 0 if ok else 1
+        acquired = []
+        for item_id in item_ids:
+            if acquire_lock(base, item_id, ctx.session):
+                acquired.append(item_id)
+                continue
+            for held in reversed(acquired):
+                release_lock(base, held, ctx.session)
+            print(f"busy {item_id}" if repo_ids else "busy")
+            return 1
+        for item_id in acquired:
+            print(f"acquired {item_id}" if repo_ids else "acquired")
+        return 0
     if args.lock_kind == "release":
-        ok = release_lock(base, item_id, ctx.session)
-        print("released" if ok else "not-owned")
-        return 0 if ok else 1
-    return 0
+        item_ids.reverse()
+        operation = release_lock
+        success, failure = "released", "not-owned"
+    else:
+        operation = update_lock
+        success, failure = "beat", "not-owned"
+    results = []
+    for item_id in item_ids:
+        ok = operation(base, item_id, ctx.session)
+        result = success if ok else failure
+        print(f"{result} {item_id}" if repo_ids else result)
+        results.append(ok)
+    return 0 if all(results) else 1
 
 
 def reap_lock(ctx: Context, base: Path, item_id: str, project_scoped: bool) -> bool:
@@ -1557,7 +1594,8 @@ def cmd_find(ctx: Context, args: argparse.Namespace) -> int:
     project_dir = ctx.project_dir()
     if args.chain:
         return cmd_find_chain(project_dir, args.chain)
-    if not args.query: raise PmtError("find requires query or --chain", 2)
+    if not args.query:
+        raise PmtError("find requires query or --chain", 2)
     raw_query = args.query
     query = raw_query.lower()
     exact_id = bool(re.fullmatch(r"[A-Za-z]\d+|[A-Za-z0-9._-]+/.+", raw_query))
@@ -1656,8 +1694,6 @@ def doctor_collect(
         missing = [key for key in req if not fm.get(key)]
         if missing:
             failures.append(f"{item_id}: missing {', '.join(missing)}")
-        if item_id != fm.get("id"):
-            failures.append(f"{path}: id mismatch")
         try:
             expected_path = id_to_path(project_dir, item_id)
             if fm.get("type") == "project":
@@ -1684,7 +1720,7 @@ def doctor_collect(
             if fm.get("kind") == "test":
                 if any(n.get("parent") == item_id for n in nodes.values()):
                     failures.append(f"{item_id}: test item has child")
-        if fm.get("status") == "In Progress":
+        if fm.get("type") == "item" and fm.get("status") == "In Progress":
             age = resume_age_minutes(body)
             if age is None or age > 24 * 60:
                 warnings.append(f"{item_id}: resume block older than 24h or missing")
@@ -1720,7 +1756,11 @@ def check_cycles(nodes: Dict[str, Dict[str, Any]]) -> List[str]:
 
 def check_lists(project_dir: Path) -> List[str]:
     failures = []
-    allowed_statuses = {"facts.md": {"Active", "Closed"}, "decisions.md": {"승인", "대체", "폐기"}, "backlog.md": {"Active", "Done", "Dropped"}}
+    allowed_statuses = {
+        "facts.md": {"Active", "Closed"},
+        "decisions.md": {"승인", "대체", "폐기"},
+        "backlog.md": {"Active", "Done", "Dropped"},
+    }
     for name in LIST_FILES:
         path = project_dir / name
         if not path.exists():
@@ -1755,7 +1795,7 @@ def doctor(ctx: Context, project_dir: Path, scope: Optional[str] = None, quiet: 
         warnings = [w for w in warnings if f"/{scope}/" in w or not w.startswith(project_dir.name + "/")]
         failures = [f for f in failures if f"/{scope}/" in f or not f.startswith(project_dir.name + "/")]
     if not quiet:
-        print(f"doctor: {0 if failures else 1} pass, {len(warnings)} warn, fail: {len(failures)}")
+        print(f"doctor: fail {len(failures)}, warn {len(warnings)}")
         for item in failures:
             print(f"FAIL {item}")
         for item in warnings:
@@ -1767,109 +1807,80 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> int:
     return doctor(ctx, ctx.project_dir(), scope=args.scope)
 
 
+def add_cli_arguments(parser: argparse.ArgumentParser, specs: Sequence[Any]) -> None:
+    for spec in specs:
+        if isinstance(spec, str):
+            parser.add_argument(spec)
+            continue
+        flags, options = spec
+        if isinstance(flags, str):
+            flags = (flags,)
+        parser.add_argument(*flags, **options)
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="pmt", description="Project Management Tool v2")
-    parser.add_argument("--docs-root")
-    parser.add_argument("--session")
-    parser.add_argument("--project")
+    for option in ("--docs-root", "--session", "--project"):
+        parser.add_argument(option)
     sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
-
-    p = sub.add_parser("new")
-    p.add_argument("slug")
-    p.add_argument("--goal", required=True)
-    p.add_argument("--label", action="append")
-
-    p = sub.add_parser("resume")
-    p.add_argument("slug")
-
-    p = sub.add_parser("add")
-    add_sub = p.add_subparsers(dest="add_kind", required=True)
-    w = add_sub.add_parser("work")
-    w.add_argument("title")
-    w.add_argument("--class", dest="class_name")
-    w.add_argument("--goal")
-    i = add_sub.add_parser("item")
-    i.add_argument("parent_id")
-    i.add_argument("title")
-    i.add_argument("--kind", choices=["job", "view", "test", "hotfix"], default="job")
-    i.add_argument("--verify")
-    f = add_sub.add_parser("fact")
-    f.add_argument("text")
-    f.add_argument("--ref")
-    b = add_sub.add_parser("backlog")
-    b.add_argument("text")
-    b.add_argument("--kind", choices=["req", "todo", "plan", "issue", "bug"], required=True)
-
-    p = sub.add_parser("decide")
-    p.add_argument("title")
-    p.add_argument("--context", required=True)
-    p.add_argument("--decision", required=True)
-    p.add_argument("--alt")
-    p.add_argument("--result")
-    p.add_argument("--supersedes")
-    p.add_argument("--decider")
-
-    p = sub.add_parser("set")
-    p.add_argument("target")
-    p.add_argument("--status")
-    p.add_argument("--why")
-    p.add_argument("--blocked-by")
-    p.add_argument("--unblock")
-
-    p = sub.add_parser("start")
-    p.add_argument("item_id")
-    p.add_argument("--note")
-    p.add_argument("--delegate", action="store_true")
-    p.add_argument("--worktree")
-
-    p = sub.add_parser("note")
-    p.add_argument("item_id")
-    p.add_argument("--did", required=True)
-    p.add_argument("--next", dest="next_step", required=True)
-    p.add_argument("--watch")
-    p.add_argument("--wait")
-    p.add_argument("--unverified")
-
-    p = sub.add_parser("verify")
-    p.add_argument("item_id")
-    p.add_argument("--cmd", required=True)
-    p.add_argument("--run", action="store_true")
-    p.add_argument("--exit", dest="exit_code", type=int)
-    for option in ("--cwd", "--limit"): p.add_argument(option)
-
-    p = sub.add_parser("end")
-    p.add_argument("item_id", nargs="?")
-    p.add_argument("--all", action="store_true")
-    p.add_argument("--done", action="store_true")
-    p.add_argument("--pause", action="store_true")
-    p.add_argument("--fail", action="store_true")
-    p.add_argument("--skip", action="store_true")
-    p.add_argument("--result")
-    p.add_argument("--evidence", action="append")
-    p.add_argument("--did")
-    p.add_argument("--next", dest="next_step")
-    p.add_argument("--watch")
-    p.add_argument("--wait")
-    p.add_argument("--unverified")
-    p.add_argument("--cause")
-    p.add_argument("--fix")
-    p.add_argument("--reason")
-    p.add_argument("--confirm", action="store_true")
-
-    p = sub.add_parser("sync", help=argparse.SUPPRESS)
-
-    p = sub.add_parser("lock")
-    p.add_argument("lock_kind", choices=["acquire", "beat", "release", "list", "reap"])
-    p.add_argument("item_id", nargs="?")
-    p.add_argument("--repo", action="append")
-
-    p = sub.add_parser("find")
-    p.add_argument("query", nargs="?")
-    p.add_argument("--chain")
-
-    p = sub.add_parser("compact", help=argparse.SUPPRESS)
-    p = sub.add_parser("doctor")
-    p.add_argument("--scope")
+    required = {"required": True}
+    store_true = {"action": "store_true"}
+    append = {"action": "append"}
+    optional = {"nargs": "?"}
+    boolean_end = [(flag, store_true) for flag in ("--all", "--done", "--pause", "--fail", "--skip", "--confirm")]
+    command_specs = {
+        "new": ["slug", ("--goal", required), ("--label", append)],
+        "resume": ["slug"],
+        "add": [],
+        "decide": [
+            "title", ("--context", required), ("--decision", required), "--alt",
+            "--result", "--supersedes", "--decider",
+        ],
+        "set": ["target", "--status", "--why", "--blocked-by", "--unblock"],
+        "start": ["item_id", "--note", ("--delegate", store_true), "--worktree"],
+        "note": [
+            "item_id", ("--did", required), ("--next", {"dest": "next_step", **required}),
+            "--watch", "--wait", "--unverified",
+        ],
+        "verify": [
+            "item_id", ("--cmd", required), ("--run", store_true),
+            ("--exit", {"dest": "exit_code", "type": int}), "--cwd", "--limit",
+        ],
+        "end": [("item_id", optional)] + boolean_end + [
+            "--result", ("--evidence", append), "--did", ("--next", {"dest": "next_step"}),
+            "--watch", "--wait", "--unverified", "--cause", "--fix", "--reason",
+        ],
+        "sync": [],
+        "lock": [
+            ("lock_kind", {"choices": ["acquire", "beat", "release", "list", "reap"]}),
+            ("item_id", optional), ("--repo", append),
+        ],
+        "find": [("query", optional), "--chain"],
+        "compact": [],
+        "doctor": ["--scope"],
+    }
+    parsers = {}
+    for name, specs in command_specs.items():
+        options = {"help": argparse.SUPPRESS} if name in {"sync", "compact"} else {}
+        parsers[name] = sub.add_parser(name, **options)
+        add_cli_arguments(parsers[name], specs)
+    add_sub = parsers["add"].add_subparsers(dest="add_kind", required=True)
+    add_specs = {
+        "work": ["title", ("--class", {"dest": "class_name"}), "--goal"],
+        "item": [
+            "parent_id", "title",
+            ("--kind", {"choices": ["job", "view", "test", "hotfix"], "default": "job"}),
+            "--verify",
+        ],
+        "fact": ["text", "--ref"],
+        "backlog": [
+            "text",
+            ("--kind", {"choices": ["req", "todo", "plan", "issue", "bug"], **required}),
+        ],
+    }
+    for name, specs in add_specs.items():
+        child = add_sub.add_parser(name)
+        add_cli_arguments(child, specs)
     return parser.parse_args(argv)
 
 

@@ -174,16 +174,26 @@ def merge_v1_list(project_dir: Path, old_name: str, new_name: str, prefix: str) 
         old_id = cells[0]
         if old_id.lower() == "id":
             continue
-        status = canonical_status(cells[1] if len(cells) > 1 else source_fm.get("status"))
+        status = migration_status(prefix, canonical_status(cells[1] if len(cells) > 1 else source_fm.get("status")))
         created = canonical_date(cells[2] if len(cells) > 2 else source_fm.get("updated"))
         content = cells[-1] if len(cells) > 1 else row
         new_id = allocate_list_id(fm, prefix)
         id_map[old_id] = new_id
-        body = insert_table_row(body, f"| {new_id} | {status} | {created} | {escape_cell(f'[{old_id}] {content}')} |")
+        escaped = escape_cell(f"[{old_id}] {content}")
+        if prefix == "D":
+            row = f"| {new_id} | {status} | {created} | {escaped} | {escaped} | |"
+        else:
+            row = f"| {new_id} | {status} | {created} | {escaped} |"
+        body = insert_table_row(body, row)
     remainder = non_table_remainder(source_body)
     if remainder:
         new_id = allocate_list_id(fm, prefix)
-        body = insert_table_row(body, f"| {new_id} | Active | {today()} | {escape_cell(f'[{old_name}] {remainder}')} |")
+        escaped = escape_cell(f"[{old_name}] {remainder}")
+        if prefix == "D":
+            row = f"| {new_id} | 승인 | {today()} | {escaped} | {escaped} | |"
+        else:
+            row = f"| {new_id} | Active | {today()} | {escaped} |"
+        body = insert_table_row(body, row)
     if id_map or remainder:
         fm["updated"] = today()
         write_doc(dst, fm, body)
@@ -206,7 +216,7 @@ def merge_v1_backlog(project_dir: Path, old_name: str, kind: str) -> Dict[str, s
         old_id = cells[0]
         if old_id.lower() == "id":
             continue
-        status = canonical_status(cells[1] if len(cells) > 1 else source_fm.get("status"))
+        status = migration_status("B", canonical_status(cells[1] if len(cells) > 1 else source_fm.get("status")))
         created = canonical_date(cells[2] if len(cells) > 2 else source_fm.get("updated"))
         content = cells[-1] if len(cells) > 1 else row
         new_id = allocate_list_id(fm, "B")
@@ -294,6 +304,15 @@ def canonical_status(value: Any) -> str:
     text = str(value or "Active").strip()
     known = {"done": "Done", "canceled": "Canceled", "cancelled": "Canceled", "in progress": "In Progress", "planned": "Planned", "active": "Active"}
     return known.get(text.lower(), text or "Active")
+
+
+def migration_status(prefix: str, status: str) -> str:
+    mappings = {
+        "F": {"Done": "Closed", "Canceled": "Closed", "Planned": "Active", "In Progress": "Active"},
+        "D": {"Done": "승인", "Canceled": "폐기", "Planned": "승인", "In Progress": "승인", "Active": "승인"},
+        "B": {"Planned": "Active", "In Progress": "Active", "Canceled": "Dropped"},
+    }
+    return mappings[prefix].get(status, status)
 
 
 def canonical_date(value: Any) -> str:

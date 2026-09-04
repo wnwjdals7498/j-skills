@@ -1,6 +1,8 @@
 import datetime as dt
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -57,6 +59,13 @@ class PmtTest(unittest.TestCase):
         work = self.run_pmt("--project", slug, "add", "work", "Build core").stdout.strip()
         item = self.run_pmt("--project", slug, "add", "item", work, title).stdout.strip()
         return slug, work, item
+
+    def set_criteria(self, slug, item, text="passes"):
+        parts = item.split("/")
+        path = self.docs / "projects" / slug / parts[1] / f"{parts[-1]}.md"
+        body = path.read_text(encoding="utf-8").replace("## 완료 기준\n-\n", f"## 완료 기준\n- {text}\n")
+        path.write_text(body, encoding="utf-8")
+        return path
 
     def test_new_add_start_note_resume_supports_cold_start(self):
         slug, _work, item = self.make_item()
@@ -127,7 +136,7 @@ class PmtTest(unittest.TestCase):
         missing = self.run_pmt("--project", slug, "end", item, "--done", ok=False)
         self.assertEqual(missing.returncode, 2)
 
-        self.run_pmt("--project", slug, "end", item, "--done", "--result", "completed parser")
+        self.run_pmt("--project", slug, "end", item, "--done", "--result", "completed parser", "--unverified", "test")
         work_text = (self.docs / "projects" / slug / "_default" / "Work1.md").read_text(encoding="utf-8")
         self.assertIn("status: Done", work_text)
         self.assertRegex(self.run_pmt("--project", slug, "doctor").stdout, r"(0 fail|fail: 0)")
@@ -191,7 +200,7 @@ class PmtTest(unittest.TestCase):
     def test_terminal_item_cannot_restart_and_end_modes_require_payloads(self):
         slug, _work, item = self.make_item()
         self.run_pmt("--project", slug, "start", item)
-        self.run_pmt("--project", slug, "end", item, "--done", "--result", "first result")
+        self.run_pmt("--project", slug, "end", item, "--done", "--result", "first result", "--unverified", "test")
 
         restarted = self.run_pmt("--project", slug, "start", item, ok=False)
         self.assertEqual(restarted.returncode, 2)
@@ -687,7 +696,7 @@ class PmtTest(unittest.TestCase):
         self.assertNotIn(second, before)
 
         self.run_pmt("--project", slug, "start", first)
-        self.run_pmt("--project", slug, "end", first, "--done", "--result", "unblock second")
+        self.run_pmt("--project", slug, "end", first, "--done", "--result", "unblock second", "--unverified", "test")
         after = self.run_pmt("resume", slug).stdout
         worklog = self.docs / "worklog" / "done" / f"{slug}___default__Work1-1.md"
 
@@ -722,13 +731,15 @@ class PmtTest(unittest.TestCase):
         decisions.write_text(decisions.read_text(encoding="utf-8") + "x" * 8100, encoding="utf-8")
         self.run_pmt("--project", slug, "compact")
 
-        result = self.run_pmt("--project", slug, "find", "D2", "--chain", "D2")
+        result = self.run_pmt("--project", slug, "find", "--chain", "D2")
+        missing = self.run_pmt("--project", slug, "find", ok=False)
         date = dt.date.today().isoformat()
 
         self.assertEqual(
             result.stdout.strip(),
             f"D1(대체, {date}) First → D2(대체, {date}) Second → D3(폐기, {date}) Third",
         )
+        self.assertEqual(missing.returncode, 2)
         self.assertIn("| D1 |", (self.docs / "projects" / slug / "archive" / "decisions.md").read_text(encoding="utf-8"))
 
     def test_auto_compact_on_done_moves_only_terminal_rows(self):
@@ -744,7 +755,7 @@ class PmtTest(unittest.TestCase):
         )
 
         self.run_pmt("--project", slug, "start", item)
-        self.run_pmt("--project", slug, "end", item, "--done", "--result", "trigger compact")
+        self.run_pmt("--project", slug, "end", item, "--done", "--result", "trigger compact", "--unverified", "test")
 
         active_facts = facts.read_text(encoding="utf-8")
         archived_facts = (project / "archive" / "facts.md").read_text(encoding="utf-8")
@@ -772,6 +783,142 @@ class PmtTest(unittest.TestCase):
             "| B1 | todo | Done |",
             (project / "archive" / "backlog.md").read_text(encoding="utf-8"),
         )
+
+    def test_verify_requires_lock_and_item_type(self):
+        slug, work, item = self.make_item(slug="verify-lock")
+        item_path = self.set_criteria(slug, item)
+        self.assertIn("base_commit: -", item_path.read_text(encoding="utf-8"))
+
+        wrong_type = self.run_pmt(
+            "--project", slug, "verify", work, "--cmd", "check", "--exit", "0", ok=False
+        )
+        unlocked = self.run_pmt(
+            "--project", slug, "verify", item, "--cmd", "check", "--exit", "0", ok=False
+        )
+        self.run_pmt("--project", slug, "start", item)
+        missing_mode = self.run_pmt(
+            "--project", slug, "verify", item, "--cmd", "check", ok=False
+        )
+        both_modes = self.run_pmt(
+            "--project", slug, "verify", item, "--cmd", "check", "--run", "--exit", "0", ok=False
+        )
+
+        self.assertEqual(wrong_type.returncode, 2)
+        self.assertEqual(unlocked.returncode, 1)
+        self.assertEqual(missing_mode.returncode, 2)
+        self.assertEqual(both_modes.returncode, 2)
+
+    def test_verify_rejects_empty_criteria(self):
+        slug, _work, item = self.make_item(slug="verify-empty")
+        self.run_pmt("--project", slug, "start", item)
+
+        result = self.run_pmt(
+            "--project", slug, "verify", item, "--cmd", "check", "--exit", "0", ok=False
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("완료 기준 비어 있음", result.stderr)
+
+    def test_verify_records_row_without_git(self):
+        slug, _work, item = self.make_item(slug="verify-no-git")
+        item_path = self.set_criteria(slug, item, "documented behavior")
+        cwd = self.docs / "not-git"
+        cwd.mkdir()
+        self.run_pmt("--project", slug, "start", item)
+
+        result = self.run_pmt(
+            "--project", slug, "verify", item, "--cmd", "manual check", "--exit", "0",
+            "--cwd", str(cwd), "--limit", "E2E NOT RUN",
+        )
+        text = item_path.read_text(encoding="utf-8")
+        criteria = hashlib.sha1("- documented behavior".encode()).hexdigest()[:8]
+        worklog = self.docs / "worklog" / f"{slug}___default__Work1-1.md"
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("| at | commit | criteria | command | exit | limits |", text)
+        self.assertIn(f"| - | {criteria} | manual check | 0 | E2E NOT RUN |", text)
+        self.assertLess(text.index("## 검증"), text.index("## 결과"))
+        self.assertIn("manual check exit 0 @- E2E NOT RUN", worklog.read_text(encoding="utf-8"))
+
+    def test_verify_with_git_records_head_and_start_reports_revalidation(self):
+        if shutil.which("git") is None:
+            self.skipTest("git unavailable")
+        repo = self.docs / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        tracked = repo / "tracked.txt"
+        tracked.write_text("one", encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-m", "one"], cwd=repo, check=True, capture_output=True)
+
+        slug, _work, item = self.make_item(slug="verify-git")
+        item_path = self.set_criteria(slug, item, "git behavior")
+        project = self.docs / "projects" / slug / "project.md"
+        project.write_text(project.read_text(encoding="utf-8").replace("repositories: []", f"repositories: [{repo}]"), encoding="utf-8")
+        self.run_pmt("--project", slug, "start", item)
+        self.run_pmt(
+            "--project", slug, "verify", item, "--cmd", "git check", "--exit", "0", "--cwd", str(repo)
+        )
+        self.run_pmt(
+            "--project", slug, "note", item, "--did", "verified", "--next", "resume validation"
+        )
+        self.run_pmt("--project", slug, "lock", "release", item)
+        fresh = self.run_pmt("--project", slug, "start", item)
+
+        self.run_pmt("--project", slug, "lock", "release", item)
+        tracked.write_text("two", encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-m", "two"], cwd=repo, check=True, capture_output=True)
+        stale = self.run_pmt("--project", slug, "start", item)
+
+        self.assertIn("재검증 불필요", fresh.stdout)
+        self.assertIn("체크포인트: 마지막 note", fresh.stdout)
+        self.assertIn("재검증 필요", stale.stdout)
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=repo, text=True, capture_output=True, check=True).stdout.strip()
+        self.assertIn(f"base_commit: {head}", item_path.read_text(encoding="utf-8"))
+
+    def test_done_gate_requires_verify_or_unverified(self):
+        slug, _work, item = self.make_item(slug="done-verified")
+        self.set_criteria(slug, item)
+        self.run_pmt("--project", slug, "start", item)
+        rejected = self.run_pmt(
+            "--project", slug, "end", item, "--done", "--result", "done", ok=False
+        )
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("pmt verify", rejected.stderr)
+        self.run_pmt("--project", slug, "verify", item, "--cmd", "check", "--exit", "0")
+        self.run_pmt("--project", slug, "end", item, "--done", "--result", "verified")
+
+        slug, _work, item = self.make_item(slug="done-unverified")
+        item_path = self.set_criteria(slug, item)
+        self.run_pmt("--project", slug, "start", item)
+        missing = self.docs / "missing-evidence"
+        unverified = self.run_pmt(
+            "--project", slug, "end", item, "--done", "--result", "accepted",
+            "--unverified", "manual approval", "--evidence", str(missing),
+        )
+        self.assertIn(f"경고: evidence 없음: {missing}", unverified.stderr)
+        self.assertIn("미검증: manual approval", item_path.read_text(encoding="utf-8"))
+
+        slug, _work, item = self.make_item(slug="done-empty")
+        self.run_pmt("--project", slug, "start", item)
+        empty = self.run_pmt("--project", slug, "end", item, "--done", "--result", "empty allowed")
+        self.assertEqual(empty.returncode, 0)
+        self.assertIn("경고: 완료 기준 비어 있음", empty.stderr)
+
+    def test_verify_run_captures_exit_code(self):
+        slug, _work, item = self.make_item(slug="verify-run")
+        item_path = self.set_criteria(slug, item)
+        self.run_pmt("--project", slug, "start", item)
+
+        result = self.run_pmt(
+            "--project", slug, "verify", item, "--cmd", "exit 3", "--run", "--cwd", str(self.docs)
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("| exit 3 | 3 |", item_path.read_text(encoding="utf-8"))
 
     def test_parallel_sync_writes_resume_and_doctor_passes(self):
         slug, _work, _item = self.make_item()

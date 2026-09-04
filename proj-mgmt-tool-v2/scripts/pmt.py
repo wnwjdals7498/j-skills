@@ -15,8 +15,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -392,7 +392,7 @@ def cmd_add(ctx: Context, args: argparse.Namespace) -> int:
             f"# [{args.kind}] {args.title}\n## 기본 내용\n-\n## 범위\n- [ ]\n"
             "## 완료 기준\n-\n## 재개\n<start 이후 note가 채움>\n## 결과\n-\n## 증거\n-\n"
         )
-        data = {"type": "item", "kind": args.kind, "id": item_id, "parent": parent_id, "status": "Planned", "updated": today()}
+        data = {"type": "item", "kind": args.kind, "id": item_id, "parent": parent_id, "status": "Planned", "blocked_by": [], "base_commit": "-", "updated": today()}
         if args.verify:
             data["verify"] = args.verify
         write_doc(id_to_path(project_dir, item_id), data, body)
@@ -525,11 +525,7 @@ def cmd_decide(ctx: Context, args: argparse.Namespace) -> int:
         content = " / ".join(f"{name}: {value}" for name, value in values if value)
         if len(content) > 300:
             decision_body = "\n".join([f"# {args.title}"] + [f"## {name}\n{value or '-'}" for name, value in values]) + "\n"
-            decision_data = {
-                "type": "decision", "id": f"{project_dir.name}/{decision_id}", "status": "승인",
-                "supersedes": args.supersedes, "created": today(), "decider": args.decider or ctx.session,
-            }
-            write_doc(project_dir / "decisions" / f"{decision_id}.md", decision_data, decision_body)
+            write_doc(project_dir / "decisions" / f"{decision_id}.md", {"type": "decision", "id": f"{project_dir.name}/{decision_id}", "status": "승인", "supersedes": args.supersedes, "created": today(), "decider": args.decider or ctx.session}, decision_body)
             summary = re.split(r"(?<=[.!?])\s+|\n+", args.decision.strip(), maxsplit=1)[0]
             content = f"결정: {summary} (전문: decisions/{decision_id}.md)"
         row = [decision_id, "승인", today(), escape_cell(args.title), escape_cell(content), args.supersedes or ""]
@@ -548,11 +544,7 @@ def cmd_decide(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def set_list_status(ctx: Context, args: argparse.Namespace, prefix: str) -> int:
-    file_name, transitions = {
-        "F": ("facts.md", {"Active": {"Closed"}}),
-        "B": ("backlog.md", {"Active": {"Done", "Dropped"}}),
-        "D": ("decisions.md", {"승인": {"폐기"}}),
-    }[prefix]
+    file_name, transitions = {"F": ("facts.md", {"Active": {"Closed"}}), "B": ("backlog.md", {"Active": {"Done", "Dropped"}}), "D": ("decisions.md", {"승인": {"폐기"}})}[prefix]
     project_dir = ctx.project_dir()
     path = project_dir / file_name
     lock_id = f"__list-{file_name}"
@@ -727,6 +719,36 @@ def resume_age_minutes(body: str) -> Optional[float]:
     return (now_local() - when).total_seconds() / 60
 
 
+def criteria_hash(body: str) -> str:
+    criteria = section_text(body, "완료 기준").strip()
+    return hashlib.sha1(criteria.encode()).hexdigest()[:8] if criteria.strip("- \t\n") else ""
+
+
+def git_head(cwd: Optional[Path]) -> str:
+    if cwd is None: return "-"
+    try:
+        proc = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--short", "HEAD"], text=True, capture_output=True, timeout=10)
+        return proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else "-"
+    except Exception:
+        return "-"
+
+
+def verify_cwd(ctx: Context, project_dir: Path, arg: Optional[str]) -> Path:
+    value = arg or next(iter(as_list(read_doc(project_dir / "project.md")[0].get("repositories"))), None)
+    return Path(value).expanduser().resolve() if value else Path.cwd()
+
+
+def verification_rows(body: str) -> List[List[str]]:
+    return [split_table_row(line) for line in section_text(body, "검증").splitlines() if line.startswith("| ") and not line.startswith("| at ") and not line.startswith("|---")]
+
+
+def append_verification(body: str, row: str) -> str:
+    current = section_text(body, "검증")
+    if current: return replace_section(body, "검증", f"{current}\n{row}")
+    block = f"## 검증\n| at | commit | criteria | command | exit | limits |\n|---|---|---|---|---|---|\n{row}\n"
+    return body.replace("## 결과\n", block + "## 결과\n", 1) if "## 결과\n" in body else body.rstrip() + "\n\n" + block
+
+
 def project_lock_base(project_dir: Path) -> Path:
     return project_dir / ".locks"
 
@@ -851,6 +873,7 @@ def cmd_start(ctx: Context, args: argparse.Namespace) -> int:
     old_log = log_path.read_text(encoding="utf-8") if log_path.exists() else None
     try:
         fm["status"] = "In Progress"
+        fm["base_commit"] = git_head(verify_cwd(ctx, project_dir, None))
         fm["updated"] = today()
         write_doc(path, fm, body)
         promote_parents(project_dir, item_id)
@@ -877,6 +900,14 @@ def print_context(ctx: Context, path: Path, item_id: str) -> None:
         text = section_text(body, heading)
         if text:
             print(f"\n## {heading}\n{text}")
+    resume, rows = section_text(body, "재개"), verification_rows(body)
+    age = resume_age_minutes(resume)
+    match = re.search(r"- 갱신:\s*([0-9T:+-]+)", resume)
+    print("체크포인트: 없음" if age is None else f"체크포인트: 마지막 note {match.group(1)[11:16]} ({int(age)}분 전)")
+    head, criteria = git_head(verify_cwd(ctx, ctx.project_dir(), None)), criteria_hash(body)
+    success = next((row for row in reversed(rows) if len(row) >= 5 and row[4] == "0"), None)
+    last = f"마지막 {rows[-1][1]}/{rows[-1][2]} exit {rows[-1][4]} @{rows[-1][0]}" if rows else "없음"
+    print(f"검증: {last} → 현재 HEAD {head} / criteria {criteria} → 재검증 {'불필요' if success and success[1:3] == [head, criteria] else '필요'}")
 
 
 def write_resume_block(path: Path, session: str, did: str, next_step: str, watch: Optional[str], wait: Optional[str], unverified: Optional[str]) -> None:
@@ -902,6 +933,33 @@ def cmd_note(ctx: Context, args: argparse.Namespace) -> int:
     append_worklog(ctx, args.item_id, "체크포인트", [f"한 것: {args.did}", f"다음: {args.next_step}", f"주의: {args.watch or '없음'}"])
     sync(ctx, project_dir)
     print(f"noted {args.item_id}")
+    return 0
+
+
+def cmd_verify(ctx: Context, args: argparse.Namespace) -> int:
+    project_dir = ctx.project_dir()
+    path = id_to_path(project_dir, args.item_id)
+    fm, body = read_doc(path)
+    if fm.get("type") != "item": raise PmtError("verify target must be an item", 2)
+    require_lock_owner(project_lock_base(project_dir), args.item_id, ctx)
+    criteria = criteria_hash(body)
+    if not criteria: raise PmtError("완료 기준 비어 있음", 2)
+    if bool(args.run) == (args.exit_code is not None): raise PmtError("choose exactly one of --run or --exit", 2)
+    cwd = verify_cwd(ctx, project_dir, args.cwd)
+    exit_code = args.exit_code
+    if args.run:
+        try:
+            exit_code = subprocess.run(args.cmd, shell=True, cwd=str(cwd), capture_output=True, timeout=600).returncode
+        except subprocess.TimeoutExpired:
+            exit_code = 124
+    commit = git_head(cwd)
+    row = join_table_row([timestamp(), commit, criteria, escape_cell(args.cmd), str(exit_code), escape_cell(args.limit or "")])
+    fm["updated"] = today()
+    write_doc(path, fm, append_verification(body, row))
+    append_worklog(ctx, args.item_id, "검증", [f"{args.cmd} exit {exit_code} @{commit}{f' {args.limit}' if args.limit else ''}"])
+    update_lock(project_lock_base(project_dir), args.item_id, ctx.session)
+    sync(ctx, project_dir)
+    print(row)
     return 0
 
 
@@ -940,6 +998,14 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
         )
         if incomplete:
             raise PmtError("cannot complete with unfinished children: " + ", ".join(incomplete), 2)
+        criteria, head = criteria_hash(body), git_head(verify_cwd(ctx, project_dir, None))
+        if fm.get("type") == "item" and not criteria: print("경고: 완료 기준 비어 있음", file=sys.stderr)
+        elif fm.get("type") == "item" and not any(len(row) >= 5 and row[1:3] == [head, criteria] and row[4] == "0" for row in verification_rows(body)):
+            if not args.unverified: raise PmtError(f"pmt verify {args.item_id} --cmd ... 또는 --unverified <사유>", 2)
+            row = join_table_row([timestamp(), head, criteria, "-", "-", escape_cell(f"미검증: {args.unverified}")])
+            body = append_verification(body, row)
+        for evidence in args.evidence or []:
+            if not Path(evidence).exists(): print(f"경고: evidence 없음: {evidence}", file=sys.stderr)
         body = replace_section(body, "결과", f"- {args.result}")
         if args.evidence:
             body = replace_section(body, "증거", "\n".join(f"- {x}" for x in args.evidence))
@@ -1337,10 +1403,13 @@ def cmd_find_chain(project_dir: Path, start_id: str) -> int:
     print(" → ".join(f"{decision_id}({rows[decision_id][0]}, {rows[decision_id][1]}) {rows[decision_id][2]}"
                      for decision_id in chain))
     return 0
+
+
 def cmd_find(ctx: Context, args: argparse.Namespace) -> int:
     project_dir = ctx.project_dir()
     if args.chain:
         return cmd_find_chain(project_dir, args.chain)
+    if not args.query: raise PmtError("find requires query or --chain", 2)
     raw_query = args.query
     query = raw_query.lower()
     exact_id = bool(re.fullmatch(r"[A-Za-z]\d+|[A-Za-z0-9._-]+/.+", raw_query))
@@ -1404,10 +1473,7 @@ def compact_lists(ctx: Context, project_dir: Path, skip_busy: bool = False) -> i
             ensure_dir(arch_path.parent)
             if not arch_path.exists():
                 table_lines = [line for line in lines if line.strip().startswith("|")]
-                arch_path.write_text(
-                    f"# Archive {name}\n" + "\n".join(table_lines[:2]) + "\n",
-                    encoding="utf-8",
-                )
+                arch_path.write_text(f"# Archive {name}\n" + "\n".join(table_lines[:2]) + "\n", encoding="utf-8")
             with arch_path.open("a", encoding="utf-8", newline="\n") as handle:
                 for line in archive:
                     handle.write(line + "\n")
@@ -1506,11 +1572,7 @@ def check_cycles(nodes: Dict[str, Dict[str, Any]]) -> List[str]:
 
 def check_lists(project_dir: Path) -> List[str]:
     failures = []
-    allowed_statuses = {
-        "facts.md": {"Active", "Closed"},
-        "decisions.md": {"승인", "대체", "폐기"},
-        "backlog.md": {"Active", "Done", "Dropped"},
-    }
+    allowed_statuses = {"facts.md": {"Active", "Closed"}, "decisions.md": {"승인", "대체", "폐기"}, "backlog.md": {"Active", "Done", "Dropped"}}
     for name in LIST_FILES:
         path = project_dir / name
         if not path.exists():
@@ -1620,6 +1682,13 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--wait")
     p.add_argument("--unverified")
 
+    p = sub.add_parser("verify")
+    p.add_argument("item_id")
+    p.add_argument("--cmd", required=True)
+    p.add_argument("--run", action="store_true")
+    p.add_argument("--exit", dest="exit_code", type=int)
+    for option in ("--cwd", "--limit"): p.add_argument(option)
+
     p = sub.add_parser("end")
     p.add_argument("item_id", nargs="?")
     p.add_argument("--all", action="store_true")
@@ -1646,7 +1715,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--repo", action="append")
 
     p = sub.add_parser("find")
-    p.add_argument("query")
+    p.add_argument("query", nargs="?")
     p.add_argument("--chain")
 
     p = sub.add_parser("compact", help=argparse.SUPPRESS)
@@ -1679,6 +1748,7 @@ def main(argv: Sequence[str] = sys.argv[1:]) -> int:
             "set": cmd_set,
             "start": cmd_start,
             "note": cmd_note,
+            "verify": cmd_verify,
             "end": cmd_end,
             "sync": cmd_sync,
             "lock": cmd_lock,

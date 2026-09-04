@@ -101,7 +101,7 @@ Item frontmatter 핵심은 `type`, `kind`, `id`, `parent`, `status`, `updated`, 
 
 ## 세션과 체크포인트
 
-`--session`과 `PMT_SESSION`이 없으면 Linux `/proc/<ppid>/stat`에서 조부모 PID를 읽어 `pid-<gppid>`를 만든다. 실패하면 `session-<ppid>`를 쓰고 lock 존재만으로 소유를 완화하며 경고한다. 같은 실행기 아래 서브에이전트는 세션 ID가 같으므로 PMT 문서와 lock을 직접 다루지 않는다.
+`--session`과 `PMT_SESSION`이 없으면 Linux `/proc/<ppid>/stat`에서 조부모 PID를 읽어 `pid-<gppid>`를 만든다. 실패하거나 조부모 PID가 0·1(sandbox 등 격리 실행기)이면 `session-<ppid>`를 쓰고 lock 존재만으로 소유를 완화하며 경고한다. 이런 환경(Codex sandbox 실측: 조부모 0)에서는 `PMT_SESSION`을 고정값으로 설정한다. 같은 실행기 아래 서브에이전트는 세션 ID가 같으므로 PMT 문서와 lock을 직접 다루지 않는다.
 
 `add` 결과는 다음 `start`, `note`, `end`, `resume`의 sync에서 RESUME에 반영된다. 내 Item heartbeat가 20분을 넘으면 모든 명령이 stderr 첫 줄에 체크포인트 경고를 낸다. 다른 Item의 heartbeat가 30분을 넘으면 `start` 전이 게이트가 막는다. 대상 lock이 30분을 넘으면 `start`가 그 한 건을 회수하고 재개 절에 비정상 종료 추정 문구를 남긴다.
 

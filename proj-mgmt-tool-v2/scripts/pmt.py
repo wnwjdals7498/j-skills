@@ -101,7 +101,9 @@ def parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
         if not line.strip():
             continue
         if line.startswith("  - ") and current:
-            data.setdefault(current, []).append(parse_scalar(line[4:]))
+            if not isinstance(data.get(current), list):
+                data[current] = []
+            data[current].append(parse_scalar(line[4:]))
             continue
         if ":" not in line:
             continue
@@ -175,17 +177,22 @@ def title_from_body(body: str) -> str:
     return "(untitled)"
 
 
+def session_from_stat(stat: str, ppid: int) -> Tuple[str, bool]:
+    grandparent = stat[stat.rindex(")") + 2 :].split()[1]
+    if grandparent in {"0", "1"}:
+        return f"session-{ppid}", False
+    return f"pid-{grandparent}", True
+
+
 def derive_session() -> Tuple[str, bool]:
     env = os.environ.get("PMT_SESSION")
     if env:
         return env, True
+    ppid = os.getppid()
     try:
-        ppid = os.getppid()
-        stat = Path(f"/proc/{ppid}/stat").read_text(encoding="utf-8")
-        rest = stat[stat.rindex(")") + 2 :].split()
-        return f"pid-{rest[1]}", True
+        return session_from_stat(Path(f"/proc/{ppid}/stat").read_text(encoding="utf-8"), ppid)
     except Exception:
-        return f"session-{os.getppid()}", False
+        return f"session-{ppid}", False
 
 
 class Context:

@@ -1092,3 +1092,25 @@ class PmtTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HelperTest(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import pmt
+
+        self.pmt = pmt
+
+    def test_parse_frontmatter_accepts_block_list_after_empty_value(self):
+        text = "---\nrepositories:\n  - /a\n  - /b\nlabels: []\n---\nbody\n"
+        fm, body = self.pmt.parse_frontmatter(text)
+        self.assertEqual(fm["repositories"], ["/a", "/b"])
+        self.assertEqual(fm["labels"], [])
+        self.assertEqual(body, "body\n")
+
+    def test_session_from_stat_treats_init_grandparent_as_unstable(self):
+        stable = self.pmt.session_from_stat("77 (bash (x)) S 4242 77 77 0 -1", 77)
+        self.assertEqual(stable, ("pid-4242", True))
+        self.assertEqual(self.pmt.session_from_stat("77 (bash) S 0 77 77 0 -1", 77), ("session-77", False))
+        self.assertEqual(self.pmt.session_from_stat("77 (bash) S 1 77 77 0 -1", 77)[1], False)
+

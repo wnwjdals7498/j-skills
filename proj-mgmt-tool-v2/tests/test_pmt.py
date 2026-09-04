@@ -151,10 +151,11 @@ class PmtTest(unittest.TestCase):
         slug, _work, _item = self.make_item()
         target = "archived fact survives"
         self.run_pmt("--project", slug, "add", "fact", target)
+        self.run_pmt("--project", slug, "set", "F1", "--status", "Closed")
         facts = self.docs / "projects" / slug / "facts.md"
         with facts.open("a", encoding="utf-8") as fh:
             for i in range(80):
-                fh.write(f"| F{i + 2} | Done | 2026-09-02 | filler {'x' * 120} |\n")
+                fh.write(f"| F{i + 2} | Active | 2026-09-02 | filler {'x' * 120} |\n")
 
         before = self.run_pmt("--project", slug, "find", "F1").stdout
         self.run_pmt("--project", slug, "lock", "acquire", "__list-facts.md", session="other")
@@ -205,6 +206,8 @@ class PmtTest(unittest.TestCase):
     def test_skip_parent_is_rejected_but_leaf_skip_keeps_doctor_clean(self):
         slug, work, parent = self.make_item()
         child = self.run_pmt("--project", slug, "add", "item", parent, "Child").stdout.strip()
+        blocked = self.run_pmt("--project", slug, "add", "item", work, "Blocked sibling").stdout.strip()
+        self.run_pmt("--project", slug, "set", blocked, "--blocked-by", child)
         self.run_pmt("--project", slug, "start", parent)
         rejected = self.run_pmt(
             "--project", slug, "end", parent, "--skip", "--reason", "obsolete", ok=False
@@ -214,6 +217,10 @@ class PmtTest(unittest.TestCase):
         self.run_pmt("--project", slug, "start", child)
         self.run_pmt("--project", slug, "end", child, "--skip", "--reason", "obsolete")
         self.assertTrue((self.docs / "projects" / slug / "canceled" / "_default__Work1-1-1.md").exists())
+        blocked_text = (self.docs / "projects" / slug / "_default" / "Work1-2.md").read_text(encoding="utf-8")
+        worklog = self.docs / "worklog" / f"{slug}___default__Work1-1-1.md"
+        self.assertNotIn(child, blocked_text)
+        self.assertIn(f"차단 해소: {blocked}", worklog.read_text(encoding="utf-8"))
         self.assertEqual(self.run_pmt("--project", slug, "doctor").returncode, 0)
 
     def test_doctor_fails_on_id_path_mismatch(self):
@@ -510,6 +517,261 @@ class PmtTest(unittest.TestCase):
         self.assertEqual(failed.returncode, 1)
         self.assertNotIn(repo_ids[0], locked_ids)
         self.assertIn(repo_ids[1], locked_ids)
+
+    def test_decide_supersedes_marks_old_row_replaced(self):
+        slug = "decisions"
+        self.run_pmt("new", slug, "--goal", "track decisions")
+        first = self.run_pmt(
+            "--project",
+            slug,
+            "decide",
+            "Original choice",
+            "--context",
+            "x" * 301,
+            "--decision",
+            "use the first option",
+        ).stdout.strip()
+        second = self.run_pmt(
+            "--project",
+            slug,
+            "decide",
+            "Replacement choice",
+            "--context",
+            "new evidence",
+            "--decision",
+            "use the replacement",
+            "--supersedes",
+            first,
+        ).stdout.strip()
+
+        path = self.docs / "projects" / slug / "decisions.md"
+        text = path.read_text(encoding="utf-8")
+        resume = self.run_pmt("resume", slug).stdout
+        old_detail = (self.docs / "projects" / slug / "decisions" / "D1.md").read_text(encoding="utf-8")
+        rejected = self.run_pmt(
+            "--project",
+            slug,
+            "decide",
+            "Invalid replacement",
+            "--context",
+            "too late",
+            "--decision",
+            "cannot replace twice",
+            "--supersedes",
+            first,
+            ok=False,
+        )
+
+        self.assertEqual(second, "D2")
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("| ID | 상태 | 생성 | 제목 | 내용 | 대체 |", text)
+        self.assertRegex(text, r"\| D1 \| 대체 \| .* \| Original choice \|")
+        self.assertRegex(text, r"\| D2 \| 승인 \| .* \| Replacement choice \| .* \| D1 \|")
+        self.assertIn("status: 대체", old_detail)
+        self.assertIn("Replacement choice", resume)
+        self.assertNotIn("Original choice", resume)
+
+    def test_decide_long_content_writes_file_and_links(self):
+        slug = "long-decision"
+        self.run_pmt("new", slug, "--goal", "store long decisions")
+        decision_id = self.run_pmt(
+            "--project",
+            slug,
+            "decide",
+            "Long choice",
+            "--context",
+            "x" * 301,
+            "--decision",
+            "Keep the durable detail. Additional explanation follows.",
+            "--alt",
+            "use a short record",
+            "--result",
+            "full context remains available",
+            "--decider",
+            "reviewer",
+        ).stdout.strip()
+
+        project = self.docs / "projects" / slug
+        row_text = (project / "decisions.md").read_text(encoding="utf-8")
+        file_text = (project / "decisions" / f"{decision_id}.md").read_text(encoding="utf-8")
+
+        self.assertIn(f"(전문: decisions/{decision_id}.md)", row_text)
+        self.assertIn("status: 승인", file_text)
+        self.assertIn("decider: reviewer", file_text)
+        self.assertIn("## 문맥", file_text)
+        self.assertIn("## 결정", file_text)
+        self.assertIn("## 대안", file_text)
+        self.assertIn("## 결과", file_text)
+
+    def test_set_decision_revoked_and_file_synced(self):
+        slug = "revoke-decision"
+        self.run_pmt("new", slug, "--goal", "revoke decisions")
+        decision_id = self.run_pmt(
+            "--project",
+            slug,
+            "decide",
+            "Revocable choice",
+            "--context",
+            "x" * 301,
+            "--decision",
+            "use the temporary choice",
+        ).stdout.strip()
+
+        self.run_pmt(
+            "--project", slug, "set", decision_id, "--status", "폐기", "--why", "no longer valid"
+        )
+        project = self.docs / "projects" / slug
+        rows = (project / "decisions.md").read_text(encoding="utf-8")
+        detail = (project / "decisions" / f"{decision_id}.md").read_text(encoding="utf-8")
+
+        self.assertRegex(rows, rf"\| {decision_id} \| 폐기 \|")
+        self.assertIn("사유: no longer valid", rows)
+        self.assertIn("status: 폐기", detail)
+
+    def test_set_rejects_invalid_transition(self):
+        slug, work, item = self.make_item(slug="invalid-transition")
+        self.run_pmt("--project", slug, "add", "fact", "fact")
+        self.run_pmt("--project", slug, "add", "backlog", "backlog", "--kind", "req")
+        self.run_pmt(
+            "--project",
+            slug,
+            "decide",
+            "Decision",
+            "--context",
+            "context",
+            "--decision",
+            "choice",
+        )
+
+        invalid = self.run_pmt("--project", slug, "set", "F1", "--status", "Done", ok=False)
+        missing = self.run_pmt("--project", slug, "set", "F99", "--status", "Closed", ok=False)
+        mixed = self.run_pmt(
+            "--project", slug, "set", item, "--status", "Done", "--blocked-by", "ext:vendor", ok=False
+        )
+        non_item = self.run_pmt(
+            "--project", slug, "set", item, "--blocked-by", work, ok=False
+        )
+        missing_relation = self.run_pmt(
+            "--project", slug, "set", item, "--blocked-by", f"{slug}/_default/Work99-1", ok=False
+        )
+
+        self.assertEqual(invalid.returncode, 2)
+        self.assertEqual(missing.returncode, 2)
+        self.assertEqual(mixed.returncode, 2)
+        self.assertEqual(non_item.returncode, 2)
+        self.assertEqual(missing_relation.returncode, 2)
+
+        project = self.docs / "projects" / slug
+        facts = project / "facts.md"
+        backlog = project / "backlog.md"
+        decisions = project / "decisions.md"
+        facts.write_text(facts.read_text(encoding="utf-8").replace("| F1 | Active |", "| F1 | Invalid |"), encoding="utf-8")
+        backlog.write_text(backlog.read_text(encoding="utf-8").replace("| B1 | req | Active |", "| B1 | req | Invalid |"), encoding="utf-8")
+        decisions.write_text(decisions.read_text(encoding="utf-8").replace("| D1 | 승인 |", "| D1 | Invalid |"), encoding="utf-8")
+        doctor = self.run_pmt("--project", slug, "doctor", ok=False)
+
+        self.assertEqual(doctor.returncode, 1)
+        self.assertIn("facts.md: invalid status F1=Invalid", doctor.stdout)
+        self.assertIn("backlog.md: invalid status B1=Invalid", doctor.stdout)
+        self.assertIn("decisions.md: invalid status D1=Invalid", doctor.stdout)
+
+    def test_set_blocked_by_hides_from_startable_and_done_unblocks(self):
+        slug, work, first = self.make_item(slug="blocked-by")
+        second = self.run_pmt("--project", slug, "add", "item", work, "Second").stdout.strip()
+        self.run_pmt("--project", slug, "set", second, "--blocked-by", first)
+        self.run_pmt("--project", slug, "set", second, "--blocked-by", first)
+        before = self.run_pmt("resume", slug).stdout
+
+        second_path = self.docs / "projects" / slug / "_default" / "Work1-2.md"
+        self.assertEqual(second_path.read_text(encoding="utf-8").count(first), 1)
+        self.assertNotIn(second, before)
+
+        self.run_pmt("--project", slug, "start", first)
+        self.run_pmt("--project", slug, "end", first, "--done", "--result", "unblock second")
+        after = self.run_pmt("resume", slug).stdout
+        worklog = self.docs / "worklog" / "done" / f"{slug}___default__Work1-1.md"
+
+        self.assertIn("blocked_by: []", second_path.read_text(encoding="utf-8"))
+        self.assertIn(second, after)
+        self.assertIn(f"차단 해소: {second}", worklog.read_text(encoding="utf-8"))
+
+        self.run_pmt("--project", slug, "set", second, "--blocked-by", "ext:vendor")
+        self.assertEqual(self.run_pmt("--project", slug, "doctor").returncode, 0)
+        self.run_pmt("--project", slug, "set", second, "--unblock", "ext:vendor")
+
+    def test_find_chain_prints_supersede_sequence(self):
+        slug = "decision-chain"
+        self.run_pmt("new", slug, "--goal", "trace decisions")
+        previous = None
+        for title in ("First", "Second", "Third"):
+            args = [
+                "--project",
+                slug,
+                "decide",
+                title,
+                "--context",
+                "context",
+                "--decision",
+                f"choose {title.lower()}",
+            ]
+            if previous:
+                args.extend(["--supersedes", previous])
+            previous = self.run_pmt(*args).stdout.strip()
+        self.run_pmt("--project", slug, "set", "D3", "--status", "폐기")
+        decisions = self.docs / "projects" / slug / "decisions.md"
+        decisions.write_text(decisions.read_text(encoding="utf-8") + "x" * 8100, encoding="utf-8")
+        self.run_pmt("--project", slug, "compact")
+
+        result = self.run_pmt("--project", slug, "find", "D2", "--chain", "D2")
+        date = dt.date.today().isoformat()
+
+        self.assertEqual(
+            result.stdout.strip(),
+            f"D1(대체, {date}) First → D2(대체, {date}) Second → D3(폐기, {date}) Third",
+        )
+        self.assertIn("| D1 |", (self.docs / "projects" / slug / "archive" / "decisions.md").read_text(encoding="utf-8"))
+
+    def test_auto_compact_on_done_moves_only_terminal_rows(self):
+        slug, _work, item = self.make_item(slug="auto-compact")
+        self.run_pmt("--project", slug, "add", "fact", "terminal fact")
+        self.run_pmt("--project", slug, "set", "F1", "--status", "Closed")
+        self.run_pmt("--project", slug, "add", "fact", "active fact")
+        project = self.docs / "projects" / slug
+        facts = project / "facts.md"
+        facts.write_text(
+            facts.read_text(encoding="utf-8").replace("active fact", "x" * 8200),
+            encoding="utf-8",
+        )
+
+        self.run_pmt("--project", slug, "start", item)
+        self.run_pmt("--project", slug, "end", item, "--done", "--result", "trigger compact")
+
+        active_facts = facts.read_text(encoding="utf-8")
+        archived_facts = (project / "archive" / "facts.md").read_text(encoding="utf-8")
+        self.assertNotIn("| F1 |", active_facts)
+        self.assertIn("| F2 | Active |", active_facts)
+        self.assertIn("| ID | 상태 | 생성 | 내용 |", archived_facts)
+        self.assertIn("| F1 | Closed |", archived_facts)
+        self.assertNotIn("| F2 |", archived_facts)
+
+        self.run_pmt("--project", slug, "add", "backlog", "terminal backlog", "--kind", "todo")
+        self.run_pmt("--project", slug, "set", "B1", "--status", "Done")
+        self.run_pmt("--project", slug, "add", "backlog", "active backlog", "--kind", "todo")
+        backlog = project / "backlog.md"
+        backlog.write_text(
+            backlog.read_text(encoding="utf-8").replace("active backlog", "y" * 8200),
+            encoding="utf-8",
+        )
+        self.run_pmt("--project", slug, "lock", "acquire", "__list-backlog.md", session="other")
+        skipped = self.run_pmt("resume", slug)
+        self.assertIn("목록 압축 건너뜀", skipped.stderr)
+        self.assertIn("| B1 | todo | Done |", backlog.read_text(encoding="utf-8"))
+        self.run_pmt("--project", slug, "lock", "release", "__list-backlog.md", session="other")
+        self.run_pmt("resume", slug)
+        self.assertIn(
+            "| B1 | todo | Done |",
+            (project / "archive" / "backlog.md").read_text(encoding="utf-8"),
+        )
 
     def test_parallel_sync_writes_resume_and_doctor_passes(self):
         slug, _work, _item = self.make_item()

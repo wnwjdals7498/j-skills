@@ -120,6 +120,9 @@ def render_frontmatter(data: Dict[str, Any], body: str) -> str:
         "id",
         "parent",
         "status",
+        "supersedes",
+        "created",
+        "decider",
         "updated",
         "labels",
         "repositories",
@@ -295,7 +298,7 @@ def list_template(kind: str, slug: str) -> str:
     if kind == "facts":
         head = "| ID | 상태 | 생성 | 내용 |\n|---|---|---|---|\n"
     elif kind == "decisions":
-        head = "| ID | 상태 | 생성 | 내용 |\n|---|---|---|---|\n"
+        head = "| ID | 상태 | 생성 | 제목 | 내용 | 대체 |\n|---|---|---|---|---|---|\n"
     else:
         head = "| ID | kind | 상태 | 생성 | 내용 |\n|---|---|---|---|---|\n\n## 점검 특징\n-\n"
     return (
@@ -400,7 +403,7 @@ def cmd_add(ctx: Context, args: argparse.Namespace) -> int:
 
 def add_list_row(ctx: Context, args: argparse.Namespace) -> int:
     project_dir = ctx.project_dir()
-    mapping = {"fact": ("facts.md", "F"), "decision": ("decisions.md", "D"), "backlog": ("backlog.md", "B")}
+    mapping = {"fact": ("facts.md", "F"), "backlog": ("backlog.md", "B")}
     file_name, prefix = mapping[args.add_kind]
     path = project_dir / file_name
     lock_id = f"__list-{file_name}"
@@ -412,10 +415,7 @@ def add_list_row(ctx: Context, args: argparse.Namespace) -> int:
         row_id = f"{prefix}{num}"
         fm["next_id"] = num + 1
         fm["updated"] = today()
-        if args.add_kind == "decision":
-            text = f"전->후: {args.from_value} -> {args.to_value}. 사유: {args.why}. 결정자: {args.decider or ctx.session}. {args.text}"
-            row = f"| {row_id} | Done | {today()} | {escape_cell(text)} |"
-        elif args.add_kind == "fact":
+        if args.add_kind == "fact":
             text = args.text + (f" 참조: {args.ref}" if args.ref else "")
             row = f"| {row_id} | Active | {today()} | {escape_cell(text)} |"
         else:
@@ -433,6 +433,18 @@ def escape_cell(text: str) -> str:
 
 
 def insert_table_row(body: str, row: str) -> str:
+    header = table_header(body)
+    cells = split_table_row(row)
+    if header == ["ID", "상태", "생성", "내용"] and len(cells) == 4:
+        cells[1] = {"Done": "Closed", "Canceled": "Closed", "Planned": "Active", "In Progress": "Active"}.get(cells[1], cells[1])
+        row = join_table_row(cells)
+    elif header == ["ID", "상태", "생성", "제목", "내용", "대체"] and len(cells) == 4:
+        cells[1] = {"Done": "승인", "Canceled": "폐기", "Planned": "승인", "In Progress": "승인", "Active": "승인"}.get(cells[1], cells[1])
+        cells = [cells[0], cells[1], cells[2], cells[3], cells[3], ""]
+        row = join_table_row(cells)
+    elif header == ["ID", "kind", "상태", "생성", "내용"] and len(cells) == 5:
+        cells[2] = {"Planned": "Active", "In Progress": "Active", "Canceled": "Dropped"}.get(cells[2], cells[2])
+        row = join_table_row(cells)
     lines = body.splitlines()
     insert_at = len(lines)
     for i, line in enumerate(lines):
@@ -441,6 +453,168 @@ def insert_table_row(body: str, row: str) -> str:
             break
     lines.insert(insert_at, row)
     return "\n".join(lines) + "\n"
+
+
+def split_table_row(row: str) -> List[str]:
+    raw = row.strip().strip("|")
+    cells: List[str] = []
+    current = []
+    escaped = False
+    for char in raw:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            current.append(char)
+            escaped = True
+        elif char == "|":
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    cells.append("".join(current).strip())
+    return cells
+
+
+def join_table_row(cells: Sequence[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def table_header(body: str) -> List[str]:
+    return next((split_table_row(line) for line in body.splitlines() if line.strip().startswith("| ID ")), [])
+
+
+def find_table_row(body: str, row_id: str) -> Optional[List[str]]:
+    return next((split_table_row(line) for line in body.splitlines() if line.strip().startswith(f"| {row_id} |")), None)
+
+
+def replace_table_row(body: str, row_id: str, cells: Sequence[str]) -> str:
+    lines = body.splitlines()
+    for index, line in enumerate(lines):
+        current = split_table_row(line) if line.strip().startswith("|") else []
+        if current and current[0] == row_id:
+            lines[index] = join_table_row(cells)
+            return "\n".join(lines) + "\n"
+    return body
+
+
+def sync_decision_file_status(project_dir: Path, decision_id: str, status: str) -> None:
+    path = project_dir / "decisions" / f"{decision_id}.md"
+    if not path.exists():
+        return
+    fm, body = read_doc(path)
+    fm["status"] = status
+    write_doc(path, fm, body)
+
+
+def cmd_decide(ctx: Context, args: argparse.Namespace) -> int:
+    project_dir = ctx.project_dir()
+    path = project_dir / "decisions.md"
+    lock_id = "__list-decisions.md"
+    if not acquire_lock(project_lock_base(project_dir), lock_id, ctx.session):
+        raise PmtError("list lock busy: decisions.md", 1)
+    try:
+        fm, body = read_doc(path)
+        status_index = table_header(body).index("상태")
+        previous = find_table_row(body, args.supersedes) if args.supersedes else None
+        if args.supersedes and (not re.fullmatch(r"D\d+", args.supersedes) or not previous or previous[status_index] != "승인"):
+            raise PmtError(f"supersedes target must be approved: {args.supersedes}", 2)
+        number = int(fm.get("next_id") or 1)
+        decision_id = f"D{number}"
+        values = (("문맥", args.context), ("결정", args.decision), ("대안", args.alt), ("결과", args.result))
+        content = " / ".join(f"{name}: {value}" for name, value in values if value)
+        if len(content) > 300:
+            decision_body = "\n".join([f"# {args.title}"] + [f"## {name}\n{value or '-'}" for name, value in values]) + "\n"
+            decision_data = {
+                "type": "decision", "id": f"{project_dir.name}/{decision_id}", "status": "승인",
+                "supersedes": args.supersedes, "created": today(), "decider": args.decider or ctx.session,
+            }
+            write_doc(project_dir / "decisions" / f"{decision_id}.md", decision_data, decision_body)
+            summary = re.split(r"(?<=[.!?])\s+|\n+", args.decision.strip(), maxsplit=1)[0]
+            content = f"결정: {summary} (전문: decisions/{decision_id}.md)"
+        row = [decision_id, "승인", today(), escape_cell(args.title), escape_cell(content), args.supersedes or ""]
+        body = insert_table_row(body, join_table_row(row))
+        if previous:
+            previous[status_index] = "대체"
+            body = replace_table_row(body, args.supersedes, previous)
+        fm.update({"next_id": number + 1, "updated": today()})
+        write_doc(path, fm, body)
+        if args.supersedes:
+            sync_decision_file_status(project_dir, args.supersedes, "대체")
+        print(decision_id)
+        return 0
+    finally:
+        release_lock(project_lock_base(project_dir), lock_id, ctx.session)
+
+
+def set_list_status(ctx: Context, args: argparse.Namespace, prefix: str) -> int:
+    file_name, transitions = {
+        "F": ("facts.md", {"Active": {"Closed"}}),
+        "B": ("backlog.md", {"Active": {"Done", "Dropped"}}),
+        "D": ("decisions.md", {"승인": {"폐기"}}),
+    }[prefix]
+    project_dir = ctx.project_dir()
+    path = project_dir / file_name
+    lock_id = f"__list-{file_name}"
+    if not acquire_lock(project_lock_base(project_dir), lock_id, ctx.session):
+        raise PmtError(f"list lock busy: {file_name}", 1)
+    try:
+        fm, body = read_doc(path)
+        header = table_header(body)
+        cells = find_table_row(body, args.target)
+        if not cells:
+            raise PmtError(f"missing list id: {args.target}", 2)
+        status_index, content_index = header.index("상태"), header.index("내용")
+        current = cells[status_index]
+        if args.status not in transitions.get(current, set()):
+            raise PmtError(f"invalid transition: {current} -> {args.status}", 2)
+        cells[status_index] = args.status
+        if args.why:
+            cells[content_index] += f" / 사유: {escape_cell(args.why)}"
+        body = replace_table_row(body, args.target, cells)
+        fm["updated"] = today()
+        write_doc(path, fm, body)
+        if prefix == "D":
+            sync_decision_file_status(project_dir, args.target, args.status)
+        print(args.target)
+        return 0
+    finally:
+        release_lock(project_lock_base(project_dir), lock_id, ctx.session)
+
+
+def cmd_set(ctx: Context, args: argparse.Namespace) -> int:
+    relation_modes = sum(value is not None for value in (args.blocked_by, args.unblock))
+    if args.status is not None and relation_modes:
+        raise PmtError("--status cannot be combined with --blocked-by or --unblock", 2)
+    match = re.fullmatch(r"([FDB])\d+", args.target)
+    if match:
+        if args.status is None or relation_modes:
+            raise PmtError("list status update requires --status", 2)
+        return set_list_status(ctx, args, match.group(1))
+    if args.status is not None or args.why is not None or relation_modes != 1:
+        raise PmtError("item relation update requires exactly one of --blocked-by or --unblock", 2)
+    project_dir = ctx.project_dir()
+    path = id_to_path(project_dir, args.target)
+    fm, body = read_doc(path)
+    if fm.get("type") != "item":
+        raise PmtError(f"target is not an item: {args.target}", 2)
+    relation = args.blocked_by if args.blocked_by is not None else args.unblock
+    if not relation.startswith("ext:"):
+        relation_path = id_to_path(project_dir, relation)
+        if not relation_path.exists():
+            raise PmtError(f"missing blocked_by item: {relation}", 2)
+        relation_fm, _ = read_doc(relation_path)
+        if relation_fm.get("type") != "item":
+            raise PmtError(f"blocked_by target is not an item: {relation}", 2)
+    blocked_by = as_list(fm.get("blocked_by"))
+    if args.blocked_by is not None and relation not in blocked_by:
+        blocked_by.append(relation)
+    elif args.unblock is not None:
+        blocked_by = [value for value in blocked_by if value != relation]
+    fm.update({"blocked_by": blocked_by, "updated": today()})
+    write_doc(path, fm, body)
+    print(args.target)
+    return 0
 
 
 def acquire_lock(base: Path, item_id: str, session: str) -> bool:
@@ -773,11 +947,16 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
         fm["status"] = "Done"
         fm["updated"] = today()
         write_doc(path, fm, body)
-        append_worklog(ctx, args.item_id, "결과", [f"결과: {args.result}", f"증거: {', '.join(args.evidence or []) or '없음'}"])
+        unblocked = remove_active_relations(project_dir, args.item_id)
+        result_lines = [f"결과: {args.result}", f"증거: {', '.join(args.evidence or []) or '없음'}"]
+        if unblocked:
+            result_lines.append(f"차단 해소: {', '.join(unblocked)}")
+        append_worklog(ctx, args.item_id, "결과", result_lines)
         move_worklog_done(ctx, args.item_id)
         release_lock(project_lock_base(project_dir), args.item_id, ctx.session)
         auto_done_parents(project_dir, args.item_id)
         append_time(ctx, args.item_id, args.result)
+        compact_lists(ctx, project_dir, skip_busy=True)
         sync(ctx, project_dir)
         doctor(ctx, project_dir, scope=args.item_id.split("/")[1] if "/" in args.item_id else None, quiet=False)
         print(f"done {args.item_id}")
@@ -834,8 +1013,11 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
         write_doc(canceled_path, fm, body)
         if path != canceled_path and path.exists():
             path.unlink()
-        remove_active_relations(project_dir, old_id)
-        append_worklog(ctx, old_id, "스킵", [args.reason])
+        unblocked = remove_active_relations(project_dir, old_id)
+        skip_lines = [args.reason]
+        if unblocked:
+            skip_lines.append(f"차단 해소: {', '.join(unblocked)}")
+        append_worklog(ctx, old_id, "스킵", skip_lines)
         release_lock(project_lock_base(project_dir), old_id, ctx.session)
         sync(ctx, project_dir)
         print(f"skipped {old_id}")
@@ -860,15 +1042,20 @@ def move_worklog_done(ctx: Context, item_id: str) -> None:
     src.replace(dst)
 
 
-def remove_active_relations(project_dir: Path, removed_id: str) -> None:
-    for node in scan_docs(project_dir).values():
+def remove_active_relations(project_dir: Path, removed_id: str) -> List[str]:
+    unblocked = []
+    for item_id, node in scan_docs(project_dir).items():
+        if node.get("type") != "item" or item_id == removed_id:
+            continue
         path = Path(node["path"])
-        fm, body = read_doc(path)
+        fm = node["frontmatter"]
         blocked_by = as_list(fm.get("blocked_by"))
         if removed_id in blocked_by:
             fm["blocked_by"] = [value for value in blocked_by if value != removed_id]
             fm["updated"] = today()
-            write_doc(path, fm, body)
+            write_doc(path, fm, node["body"])
+            unblocked.append(item_id)
+    return sorted(unblocked)
 
 
 def append_time(ctx: Context, item_id: str, result: str) -> None:
@@ -968,7 +1155,7 @@ def render_resume(ctx: Context, project_dir: Path, graph: Dict[str, Any]) -> str
     if roots == 0:
         lines.append("- 없음")
     lines.append("\n## 최근 결정 5 / 최근 사실 5")
-    lines.extend(recent_list_rows(project_dir / "decisions.md", 5))
+    lines.extend(recent_list_rows(project_dir / "decisions.md", 5, status="승인"))
     lines.extend(recent_list_rows(project_dir / "facts.md", 5))
     lines.append("\n## 최근 worklog 결과 3")
     lines.extend(recent_worklog(ctx, project_dir.name, 3))
@@ -984,11 +1171,14 @@ def render_resume(ctx: Context, project_dir: Path, graph: Dict[str, Any]) -> str
     return text
 
 
-def recent_list_rows(path: Path, limit: int) -> List[str]:
+def recent_list_rows(path: Path, limit: int, status: Optional[str] = None) -> List[str]:
     if not path.exists():
         return []
     _, body = read_doc(path)
     rows = [line for line in body.splitlines() if line.startswith("| ") and not line.startswith("| ID ") and not line.startswith("|---")]
+    if status:
+        status_index = table_header(body).index("상태")
+        rows = [line for line in rows if split_table_row(line)[status_index] == status]
     return [f"- {row.strip('| ')}" for row in rows[-limit:]]
 
 
@@ -1008,6 +1198,7 @@ def recent_worklog(ctx: Context, slug: str, limit: int) -> List[str]:
 def cmd_resume(ctx: Context, args: argparse.Namespace) -> int:
     ctx.project = args.slug
     project_dir = ctx.project_dir(args.slug)
+    compact_lists(ctx, project_dir, skip_busy=True)
     sync(ctx, project_dir)
     print((project_dir / "RESUME.md").read_text(encoding="utf-8"))
     return 0
@@ -1107,8 +1298,49 @@ def reap_locks(ctx: Context, base: Path, project_scoped: bool) -> int:
     return 0
 
 
+def decision_rows(project_dir: Path) -> Dict[str, Tuple[str, str, str, str]]:
+    rows = {}
+    for path in (project_dir / "decisions.md", project_dir / "archive" / "decisions.md"):
+        if not path.exists():
+            continue
+        _, body = read_doc(path)
+        for line in body.splitlines():
+            cells = split_table_row(line) if line.strip().startswith("|") else []
+            if len(cells) < 6 or not re.fullmatch(r"D\d+", cells[0]):
+                continue
+            rows[cells[0]] = (cells[1], cells[2], cells[3], cells[5])
+    return rows
+
+
+def cmd_find_chain(project_dir: Path, start_id: str) -> int:
+    if not re.fullmatch(r"D\d+", start_id):
+        raise PmtError(f"invalid decision id: {start_id}", 2)
+    rows = decision_rows(project_dir)
+    if start_id not in rows:
+        print("0건")
+        return 0
+    chain, seen = [start_id], {start_id}
+    while True:
+        previous = rows[chain[0]][3]
+        if previous not in rows or previous in seen:
+            break
+        chain.insert(0, previous)
+        seen.add(previous)
+    following = {}
+    for decision_id in sorted(rows, key=lambda value: int(value[1:])):
+        following.setdefault(rows[decision_id][3], decision_id)
+    current = start_id
+    while current in following and following[current] not in seen:
+        current = following[current]
+        chain.append(current)
+        seen.add(current)
+    print(" → ".join(f"{decision_id}({rows[decision_id][0]}, {rows[decision_id][1]}) {rows[decision_id][2]}"
+                     for decision_id in chain))
+    return 0
 def cmd_find(ctx: Context, args: argparse.Namespace) -> int:
     project_dir = ctx.project_dir()
+    if args.chain:
+        return cmd_find_chain(project_dir, args.chain)
     raw_query = args.query
     query = raw_query.lower()
     exact_id = bool(re.fullmatch(r"[A-Za-z]\d+|[A-Za-z0-9._-]+/.+", raw_query))
@@ -1134,9 +1366,8 @@ def cmd_find(ctx: Context, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_compact(ctx: Context, args: argparse.Namespace) -> int:
-    project_dir = ctx.project_dir()
-    moved = 0
+def compact_lists(ctx: Context, project_dir: Path, skip_busy: bool = False) -> int:
+    moved, terminal = 0, {"Closed", "Done", "Dropped", "대체", "폐기"}
     for name in LIST_FILES:
         path = project_dir / name
         if not path.exists():
@@ -1146,6 +1377,9 @@ def cmd_compact(ctx: Context, args: argparse.Namespace) -> int:
             continue
         lock_id = f"__list-{name}"
         if not acquire_lock(project_lock_base(project_dir), lock_id, ctx.session):
+            if skip_busy:
+                print(f"경고: 목록 압축 건너뜀: {name} lock busy", file=sys.stderr)
+                continue
             raise PmtError(f"list lock busy: {name}", 1)
         try:
             text = path.read_text(encoding="utf-8")
@@ -1153,9 +1387,14 @@ def cmd_compact(ctx: Context, args: argparse.Namespace) -> int:
                 continue
             fm, body = parse_frontmatter(text)
             lines = body.splitlines()
+            header = table_header(body)
+            if "상태" not in header:
+                raise PmtError(f"missing 상태 column: {name}", 2)
+            status_index = header.index("상태")
             keep, archive = [], []
             for line in lines:
-                if line.startswith("| ") and ("| Done |" in line or "| Canceled |" in line):
+                cells = split_table_row(line) if line.strip().startswith("|") else []
+                if len(cells) > status_index and cells[0] != "ID" and cells[status_index] in terminal:
                     archive.append(line)
                 else:
                     keep.append(line)
@@ -1163,16 +1402,25 @@ def cmd_compact(ctx: Context, args: argparse.Namespace) -> int:
                 continue
             arch_path = project_dir / "archive" / name
             ensure_dir(arch_path.parent)
+            if not arch_path.exists():
+                table_lines = [line for line in lines if line.strip().startswith("|")]
+                arch_path.write_text(
+                    f"# Archive {name}\n" + "\n".join(table_lines[:2]) + "\n",
+                    encoding="utf-8",
+                )
             with arch_path.open("a", encoding="utf-8", newline="\n") as handle:
-                if arch_path.stat().st_size == 0:
-                    handle.write(f"# Archive {name}\n")
                 for line in archive:
                     handle.write(line + "\n")
             write_doc(path, fm, "\n".join(keep) + "\n")
             moved += len(archive)
         finally:
             release_lock(project_lock_base(project_dir), lock_id, ctx.session)
-    sync(ctx, project_dir)
+    return moved
+
+
+def cmd_compact(ctx: Context, args: argparse.Namespace) -> int:
+    moved = compact_lists(ctx, ctx.project_dir())
+    sync(ctx, ctx.project_dir())
     print(f"moved {moved}")
     return 0
 
@@ -1211,6 +1459,8 @@ def doctor_collect(
             else:
                 failures.append(f"{item_id}: missing parent {parent}")
         for rel in as_list(fm.get("blocked_by")):
+            if rel.startswith("ext:"):
+                continue
             if rel not in nodes:
                 failures.append(f"{item_id}: missing relation blocked_by={rel}")
         if fm.get("type") == "item":
@@ -1256,16 +1506,31 @@ def check_cycles(nodes: Dict[str, Dict[str, Any]]) -> List[str]:
 
 def check_lists(project_dir: Path) -> List[str]:
     failures = []
+    allowed_statuses = {
+        "facts.md": {"Active", "Closed"},
+        "decisions.md": {"승인", "대체", "폐기"},
+        "backlog.md": {"Active", "Done", "Dropped"},
+    }
     for name in LIST_FILES:
         path = project_dir / name
         if not path.exists():
             failures.append(f"missing list: {name}")
             continue
         fm, body = read_doc(path)
+        header = table_header(body)
+        if "상태" not in header:
+            failures.append(f"{name}: missing 상태 column")
+            continue
+        status_index = header.index("상태")
         ids = []
         for line in body.splitlines():
-            if line.startswith("| ") and not line.startswith("| ID ") and not line.startswith("|---"):
-                ids.append(line.split("|")[1].strip())
+            cells = split_table_row(line) if line.strip().startswith("|") else []
+            if not cells or cells[0] == "ID" or set(cells[0]) <= {"-"}:
+                continue
+            ids.append(cells[0])
+            if len(cells) <= status_index or cells[status_index] not in allowed_statuses[name]:
+                status = cells[status_index] if len(cells) > status_index else ""
+                failures.append(f"{name}: invalid status {cells[0]}={status}")
         if len(ids) != len(set(ids)):
             failures.append(f"{name}: duplicate ids")
         nums = [int(x[1:]) for x in ids if len(x) > 1 and x[1:].isdigit()]
@@ -1321,15 +1586,25 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     f = add_sub.add_parser("fact")
     f.add_argument("text")
     f.add_argument("--ref")
-    d = add_sub.add_parser("decision")
-    d.add_argument("text")
-    d.add_argument("--from", dest="from_value", required=True)
-    d.add_argument("--to", dest="to_value", required=True)
-    d.add_argument("--why", required=True)
-    d.add_argument("--decider")
     b = add_sub.add_parser("backlog")
     b.add_argument("text")
     b.add_argument("--kind", choices=["req", "todo", "plan", "issue", "bug"], required=True)
+
+    p = sub.add_parser("decide")
+    p.add_argument("title")
+    p.add_argument("--context", required=True)
+    p.add_argument("--decision", required=True)
+    p.add_argument("--alt")
+    p.add_argument("--result")
+    p.add_argument("--supersedes")
+    p.add_argument("--decider")
+
+    p = sub.add_parser("set")
+    p.add_argument("target")
+    p.add_argument("--status")
+    p.add_argument("--why")
+    p.add_argument("--blocked-by")
+    p.add_argument("--unblock")
 
     p = sub.add_parser("start")
     p.add_argument("item_id")
@@ -1372,6 +1647,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
     p = sub.add_parser("find")
     p.add_argument("query")
+    p.add_argument("--chain")
 
     p = sub.add_parser("compact", help=argparse.SUPPRESS)
     p = sub.add_parser("doctor")
@@ -1399,6 +1675,8 @@ def main(argv: Sequence[str] = sys.argv[1:]) -> int:
             "new": cmd_new,
             "resume": cmd_resume,
             "add": cmd_add,
+            "decide": cmd_decide,
+            "set": cmd_set,
             "start": cmd_start,
             "note": cmd_note,
             "end": cmd_end,

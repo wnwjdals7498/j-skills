@@ -525,3 +525,9 @@ updated: YYYY-MM-DD
 2. 9.4 순서로 엔진을 만든다. 각 단계마다 10절의 해당 테스트를 통과시킨다.
 3. SKILL.md는 불변식 8개(2절)·명령표(9.1)·진입 3단계(6.2)·완료 보고 형식만 담는다. 8000자를 넘으면 참조로 보낸다.
 4. 이 서버의 v1 프로젝트를 `~/docs`(git) 복제로 가져와 11절 이관을 1개 프로젝트에 실행하고 수용 기준을 확인한다.
+
+---
+
+## v2.1 변경 요약 (2026-09-04)
+
+설계·지시서·실행 기록은 `proj-mgmt-tool-v2.1-guide.md`에 있다. 요지: v1 이관 코드 분리(`scripts/migrate_v1.py`), `graph` 명령과 생성물 4종(`graph.md graph.json Doing.md index.md`) 제거, 관계 필드는 `blocked_by`만, `decide`(ADR 상태 기반·`--supersedes`)·`set`(목록 상태 전이·차단)·`verify`(commit·완료 기준 해시 기록, 완료 게이트) 신설, lock을 TTL 임대로(stale 자동 회수·전이 게이트·20분 경고), 세션 ID 자동 파생, RESUME 절별 예산(≤4,500자)과 note 400자 상한, `close`는 `end <slug> --done --confirm`으로 흡수. 런타임 hook은 쓰지 않는다(Codex·Claude Code 동일 동작).

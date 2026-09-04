@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 LIST_FILES = ("facts.md", "decisions.md", "backlog.md")
 GENERATED = {"RESUME.md"}
+SKIP_DIRS = {"archive", "canceled", "resources", ".locks", ".migration-v1-backup", "decisions"}
 STALE_MINUTES = 30
 
 
@@ -182,14 +183,20 @@ class Context:
         self.project = getattr(args, "project", None) or self.detect_project()
 
     def detect_project(self) -> Optional[str]:
+        path = self.docs_root / "projects"
         try:
-            cwd = Path.cwd().resolve()
-            root = (self.docs_root / "projects").resolve()
-            cwd.relative_to(root)
-            rel = cwd.relative_to(root)
-            return rel.parts[0] if rel.parts else None
-        except Exception:
+            path = Path.cwd()
+            cwd = path.resolve()
+            path = self.docs_root / "projects"
+            root = path.resolve()
+        except Exception as exc:
+            print(f"경고: {path} {exc}", file=sys.stderr)
             return None
+        try:
+            rel = cwd.relative_to(root)
+        except ValueError:
+            return None
+        return rel.parts[0] if rel.parts else None
 
     def require_project(self) -> str:
         if not self.project:
@@ -215,19 +222,23 @@ def id_to_path(project_dir: Path, item_id: str) -> Path:
 def scan_docs(project_dir: Path) -> Dict[str, Dict[str, Any]]:
     nodes: Dict[str, Dict[str, Any]] = {}
     for path in project_dir.rglob("*.md"):
-        if any(part in {"archive", "resources", ".locks", "canceled", ".migration-v1-backup"} for part in path.parts):
+        if any(part in SKIP_DIRS for part in path.relative_to(project_dir).parts):
             continue
         if path.name in GENERATED or path.name in LIST_FILES:
             continue
         try:
             fm, body = read_doc(path)
-        except Exception:
+        except Exception as exc:
+            print(f"경고: {path} {exc}", file=sys.stderr)
             continue
         item_id = fm.get("id")
         if not item_id:
             continue
         nodes[str(item_id)] = {
             "path": str(path),
+            "body": body,
+            "frontmatter": fm,
+            "id": fm.get("id"),
             "type": fm.get("type"),
             "kind": fm.get("kind"),
             "status": fm.get("status"),
@@ -332,6 +343,9 @@ def cmd_add(ctx: Context, args: argparse.Namespace) -> int:
     project_dir = ctx.project_dir()
     if args.add_kind == "work":
         class_name = args.class_name or "_default"
+        reserved = {"archive", "canceled", "resources", "decisions", ".locks"}
+        if class_name in reserved or class_name.startswith(".") or (class_name.startswith("_") and class_name != "_default"):
+            raise PmtError(f"reserved classification: {class_name}", 2)
         name = next_work_id(project_dir, class_name)
         item_id = f"{ctx.require_project()}/{class_name}/{name}"
         parent = f"{ctx.require_project()}/{class_name}"
@@ -340,7 +354,6 @@ def cmd_add(ctx: Context, args: argparse.Namespace) -> int:
             "## 결과\n-\n## 증거\n-\n"
         )
         write_doc(id_to_path(project_dir, item_id), {"type": "work", "id": item_id, "parent": parent, "status": "Planned", "updated": today()}, body)
-        sync(ctx, project_dir)
         print(item_id)
         return 0
     if args.add_kind == "item":
@@ -364,7 +377,6 @@ def cmd_add(ctx: Context, args: argparse.Namespace) -> int:
         if args.verify:
             data["verify"] = args.verify
         write_doc(id_to_path(project_dir, item_id), data, body)
-        sync(ctx, project_dir)
         print(item_id)
         return 0
     return add_list_row(ctx, args)
@@ -394,7 +406,6 @@ def add_list_row(ctx: Context, args: argparse.Namespace) -> int:
             row = f"| {row_id} | {args.kind} | Active | {today()} | {escape_cell(args.text)} |"
         body = insert_table_row(body, row)
         write_doc(path, fm, body)
-        sync(ctx, project_dir)
         print(row_id)
         return 0
     finally:
@@ -402,7 +413,7 @@ def add_list_row(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def escape_cell(text: str) -> str:
-    return text.replace("|", "\\|").replace("\n", " ")
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
 
 
 def insert_table_row(body: str, row: str) -> str:
@@ -478,7 +489,7 @@ def release_lock(base: Path, item_id: str, session: Optional[str] = None) -> boo
     return True
 
 
-def read_locks(base: Path) -> List[Dict[str, Any]]:
+def read_locks(base: Path, stale_minutes: int = STALE_MINUTES) -> List[Dict[str, Any]]:
     rows = []
     if not base.exists():
         return rows
@@ -490,10 +501,8 @@ def read_locks(base: Path) -> List[Dict[str, Any]]:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        hb = parse_time(str(meta.get("heartbeat", "")))
-        stale = bool(hb and (now_local() - hb).total_seconds() > STALE_MINUTES * 60)
         meta["path"] = str(lock_dir)
-        meta["stale"] = stale
+        meta["stale"] = lock_age_minutes(meta) >= stale_minutes
         rows.append(meta)
     return rows
 
@@ -503,6 +512,23 @@ def parse_time(value: str) -> Optional[dt.datetime]:
         return dt.datetime.fromisoformat(value)
     except Exception:
         return None
+
+
+def lock_age_minutes(meta: Dict[str, Any]) -> float:
+    heartbeat = parse_time(str(meta.get("heartbeat", "")))
+    if not heartbeat:
+        return 0.0
+    return (now_local() - heartbeat).total_seconds() / 60
+
+
+def resume_age_minutes(body: str) -> Optional[float]:
+    match = re.search(r"^- 갱신:\s*([0-9T:+-]+)", body, re.M)
+    if not match:
+        return None
+    when = parse_time(match.group(1))
+    if not when:
+        return None
+    return (now_local() - when).total_seconds() / 60
 
 
 def project_lock_base(project_dir: Path) -> Path:
@@ -550,15 +576,13 @@ def append_worklog(ctx: Context, item_id: str, heading: str, lines: Sequence[str
             handle.write(f"- {line}\n")
 
 
-def set_status(project_dir: Path, item_id: str, status: str) -> None:
-    path = id_to_path(project_dir, item_id)
-    fm, body = read_doc(path)
-    fm["status"] = status
-    fm["updated"] = today()
-    write_doc(path, fm, body)
-
-
 def promote_parents(project_dir: Path, item_id: str) -> None:
+    project_path = project_dir / "project.md"
+    project_fm, project_body = read_doc(project_path)
+    if project_fm.get("status") == "Planned":
+        project_fm["status"] = "In Progress"
+        project_fm["updated"] = today()
+        write_doc(project_path, project_fm, project_body)
     current = item_id
     while True:
         path = id_to_path(project_dir, current)
@@ -600,7 +624,11 @@ def cmd_start(ctx: Context, args: argparse.Namespace) -> int:
     if not acquire_lock(project_lock_base(project_dir), item_id, ctx.session):
         print(f"lock busy: {item_id}", file=sys.stderr)
         return 1
-    backup_docs = {p: p.read_text(encoding="utf-8") for p in project_dir.rglob("*.md") if ".locks" not in p.parts}
+    backup_docs = {
+        p: p.read_text(encoding="utf-8")
+        for p in project_dir.rglob("*.md")
+        if not any(part in SKIP_DIRS for part in p.relative_to(project_dir).parts)
+    }
     log_path = worklog_path(ctx, item_id)
     old_log = log_path.read_text(encoding="utf-8") if log_path.exists() else None
     try:
@@ -659,14 +687,6 @@ def cmd_note(ctx: Context, args: argparse.Namespace) -> int:
     return 0
 
 
-def resume_is_fresh(text: str) -> bool:
-    match = re.search(r"갱신:\s*([0-9T:+-]+)", text)
-    if not match:
-        return False
-    when = parse_time(match.group(1))
-    return bool(when and (now_local() - when).total_seconds() <= 60 * 60)
-
-
 def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
     project_dir = ctx.project_dir()
     if args.all:
@@ -695,6 +715,13 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
         if not args.result:
             raise PmtError("--done requires --result", 2)
         require_lock_owner(project_lock_base(project_dir), args.item_id, ctx.session)
+        incomplete = sorted(
+            item_id
+            for item_id, node in scan_docs(project_dir).items()
+            if node.get("parent") == args.item_id and node.get("status") in {"Planned", "In Progress"}
+        )
+        if incomplete:
+            raise PmtError("cannot complete with unfinished children: " + ", ".join(incomplete), 2)
         body = replace_section(body, "결과", f"- {args.result}")
         if args.evidence:
             body = replace_section(body, "증거", "\n".join(f"- {x}" for x in args.evidence))
@@ -714,9 +741,10 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
     if args.pause:
         require_lock_owner(project_lock_base(project_dir), args.item_id, ctx.session)
         resume = section_text(body, "재개")
+        resume_age = resume_age_minutes(resume)
         if args.did and args.next_step:
             write_resume_block(path, ctx.session, args.did, args.next_step, args.watch, args.wait, args.unverified)
-        elif not resume_is_fresh(resume):
+        elif resume_age is None or resume_age > 60:
             raise PmtError("--pause requires fresh resume block or --did and --next", 2)
         append_worklog(ctx, args.item_id, "체크포인트", ["pause"])
         release_lock(project_lock_base(project_dir), args.item_id, ctx.session)
@@ -752,12 +780,13 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
         fm["status"] = "Canceled"
         fm["updated"] = today()
         fm["canceled_from_id"] = old_id
-        new_id = f"{project_dir.name}/canceled/{Path(path).stem}"
+        class_name = old_id.split("/")[1]
+        canceled_path = unique_path(project_dir / "canceled" / f"{class_name}__{path.stem}.md")
+        new_id = f"{project_dir.name}/canceled/{canceled_path.stem}"
         fm["id"] = new_id
         fm["parent"] = f"{project_dir.name}/canceled"
         fm.pop("blocked_by", None)
         body = replace_section(body, "결과", f"- skipped: {args.reason}")
-        canceled_path = project_dir / "canceled" / path.name
         write_doc(canceled_path, fm, body)
         if path != canceled_path and path.exists():
             path.unlink()
@@ -806,18 +835,26 @@ def append_time(ctx: Context, item_id: str, result: str) -> None:
 
 
 def auto_done_parents(project_dir: Path, item_id: str) -> None:
+    nodes = scan_docs(project_dir)
     current = item_id
     while True:
-        fm, _ = read_doc(id_to_path(project_dir, current))
+        node = nodes.get(current)
+        if not node:
+            return
+        fm = node["frontmatter"]
         parent = fm.get("parent")
         if not parent or parent == project_dir.name:
             return
-        siblings = [node for node in scan_docs(project_dir).values() if node.get("parent") == parent]
+        siblings = [candidate for candidate in nodes.values() if candidate.get("parent") == parent]
         if siblings and all(s.get("status") in {"Done", "Canceled"} for s in siblings):
-            try:
-                set_status(project_dir, str(parent), "Done")
-            except PmtError:
+            parent_node = nodes.get(str(parent))
+            if not parent_node:
                 return
+            parent_fm = parent_node["frontmatter"]
+            parent_fm["status"] = "Done"
+            parent_fm["updated"] = today()
+            write_doc(Path(parent_node["path"]), parent_fm, parent_node["body"])
+            parent_node["status"] = "Done"
             current = str(parent)
         else:
             return
@@ -855,10 +892,9 @@ def render_resume(ctx: Context, project_dir: Path, graph: Dict[str, Any]) -> str
     active_item = sum(1 for n in nodes.values() if n.get("type") == "item" and n.get("status") == "In Progress")
     locks = [row for row in read_locks(project_lock_base(project_dir)) if not str(row.get("id", "")).startswith("__")]
     project_goal = ""
-    project_path = project_dir / "project.md"
-    if project_path.exists():
-        _, body = read_doc(project_path)
-        goal = section_text(body, "Goal")
+    project = nodes.get(project_dir.name)
+    if project:
+        goal = section_text(project["body"], "Goal")
         project_goal = next((line.strip("- ").strip() for line in goal.splitlines() if line.strip("- ")), "")
     lines = [
         f"# RESUME - {project_dir.name} 생성 {timestamp()}",
@@ -893,7 +929,7 @@ def render_resume(ctx: Context, project_dir: Path, graph: Dict[str, Any]) -> str
     lines.append("\n## 최근 worklog 결과 3")
     lines.extend(recent_worklog(ctx, project_dir.name, 3))
     lines.append("\n## 주의 (doctor warn/fail 요약)")
-    warnings, failures = doctor_collect(project_dir)
+    warnings, failures = doctor_collect(project_dir, nodes)
     for item in (failures + warnings)[:10]:
         lines.append(f"- {item}")
     if not warnings and not failures:
@@ -971,6 +1007,7 @@ def reap_locks(ctx: Context, base: Path, project_scoped: bool) -> int:
         if not row.get("stale"):
             continue
         if project_scoped:
+            path = ctx.project_dir() / str(row.get("id", ""))
             try:
                 path = id_to_path(ctx.project_dir(), row["id"])
                 fm, body = read_doc(path)
@@ -978,8 +1015,8 @@ def reap_locks(ctx: Context, base: Path, project_scoped: bool) -> int:
                 line = f"- 비정상 종료 추정 (abnormal exit suspected): 마지막 체크포인트 {row.get('heartbeat')}, 이후 작업 미기록"
                 body = replace_section(body, "재개", line + "\n" + resume)
                 write_doc(path, fm, body)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"경고: {path} {exc}", file=sys.stderr)
         shutil.rmtree(Path(row["path"]))
         count += 1
     if project_scoped:
@@ -1000,6 +1037,8 @@ def cmd_find(ctx: Context, args: argparse.Namespace) -> int:
         if not root.exists():
             continue
         for path in root.rglob("*.md"):
+            if any(part in SKIP_DIRS for part in path.relative_to(root).parts):
+                continue
             text = path.read_text(encoding="utf-8", errors="ignore")
             for line_no, line in enumerate(text.splitlines(), 1):
                 matched = bool(exact_pattern.search(line)) if exact_id else query in line.lower()
@@ -1007,7 +1046,8 @@ def cmd_find(ctx: Context, args: argparse.Namespace) -> int:
                     hits.append(f"{path}:{line_no}: {line}")
                     break
     if not hits:
-        return 1
+        print("0건")
+        return 0
     print("\n".join(hits))
     return 0
 
@@ -1017,40 +1057,55 @@ def cmd_compact(ctx: Context, args: argparse.Namespace) -> int:
     moved = 0
     for name in LIST_FILES:
         path = project_dir / name
-        if not path.exists() or path.stat().st_size <= 8000:
+        if not path.exists():
             continue
-        fm, body = read_doc(path)
-        lines = body.splitlines()
-        keep, archive = [], []
-        for line in lines:
-            if line.startswith("| ") and ("| Done |" in line or "| Canceled |" in line):
-                archive.append(line)
-            else:
-                keep.append(line)
-        if not archive:
+        text = path.read_text(encoding="utf-8")
+        if len(text) <= 8000:
             continue
-        arch_path = project_dir / "archive" / name
-        ensure_dir(arch_path.parent)
-        with arch_path.open("a", encoding="utf-8", newline="\n") as handle:
-            if arch_path.stat().st_size == 0:
-                handle.write(f"# Archive {name}\n")
-            for line in archive:
-                handle.write(line + "\n")
-        write_doc(path, fm, "\n".join(keep) + "\n")
-        moved += len(archive)
+        lock_id = f"__list-{name}"
+        if not acquire_lock(project_lock_base(project_dir), lock_id, ctx.session):
+            raise PmtError(f"list lock busy: {name}", 1)
+        try:
+            text = path.read_text(encoding="utf-8")
+            if len(text) <= 8000:
+                continue
+            fm, body = parse_frontmatter(text)
+            lines = body.splitlines()
+            keep, archive = [], []
+            for line in lines:
+                if line.startswith("| ") and ("| Done |" in line or "| Canceled |" in line):
+                    archive.append(line)
+                else:
+                    keep.append(line)
+            if not archive:
+                continue
+            arch_path = project_dir / "archive" / name
+            ensure_dir(arch_path.parent)
+            with arch_path.open("a", encoding="utf-8", newline="\n") as handle:
+                if arch_path.stat().st_size == 0:
+                    handle.write(f"# Archive {name}\n")
+                for line in archive:
+                    handle.write(line + "\n")
+            write_doc(path, fm, "\n".join(keep) + "\n")
+            moved += len(archive)
+        finally:
+            release_lock(project_lock_base(project_dir), lock_id, ctx.session)
     sync(ctx, project_dir)
     print(f"moved {moved}")
     return 0
 
 
-def doctor_collect(project_dir: Path) -> Tuple[List[str], List[str]]:
+def doctor_collect(
+    project_dir: Path, nodes: Optional[Dict[str, Dict[str, Any]]] = None
+) -> Tuple[List[str], List[str]]:
     warnings: List[str] = []
     failures: List[str] = []
-    nodes = scan_docs(project_dir)
+    nodes = nodes if nodes is not None else scan_docs(project_dir)
     required = ["type", "id", "status", "updated"]
     for item_id, node in nodes.items():
         path = Path(node["path"])
-        fm, body = read_doc(path)
+        fm = node["frontmatter"]
+        body = node["body"]
         req = list(required)
         if fm.get("type") != "project":
             req.append("parent")
@@ -1084,8 +1139,8 @@ def doctor_collect(project_dir: Path) -> Tuple[List[str], List[str]]:
                 if any(n.get("parent") == item_id for n in nodes.values()):
                     failures.append(f"{item_id}: test item has child")
         if fm.get("status") == "In Progress":
-            resume = section_text(body, "재개")
-            if not resume_is_recent_hours(resume, 24):
+            age = resume_age_minutes(body)
+            if age is None or age > 24 * 60:
                 warnings.append(f"{item_id}: resume block older than 24h or missing")
     for row in read_locks(project_lock_base(project_dir)):
         if row.get("stale"):
@@ -1098,14 +1153,6 @@ def doctor_collect(project_dir: Path) -> Tuple[List[str], List[str]]:
         if not (project_dir / name).exists():
             warnings.append(f"missing generated file: {name}")
     return warnings, failures
-
-
-def resume_is_recent_hours(text: str, hours: int) -> bool:
-    match = re.search(r"갱신:\s*([0-9T:+-]+)", text)
-    if not match:
-        return False
-    when = parse_time(match.group(1))
-    return bool(when and (now_local() - when).total_seconds() <= hours * 3600)
 
 
 def check_cycles(nodes: Dict[str, Dict[str, Any]]) -> List[str]:
@@ -1271,6 +1318,9 @@ def main(argv: Sequence[str] = sys.argv[1:]) -> int:
     except PmtError as exc:
         print(str(exc), file=sys.stderr)
         return exc.code
+    except Exception as exc:
+        print(str(exc).replace("\n", " "), file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":

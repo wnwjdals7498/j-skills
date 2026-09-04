@@ -26,6 +26,7 @@ LIST_FILES = ("facts.md", "decisions.md", "backlog.md")
 GENERATED = {"RESUME.md"}
 SKIP_DIRS = {"archive", "canceled", "resources", ".locks", ".migration-v1-backup", "decisions"}
 STALE_MINUTES = 30
+WARN_MINUTES = 20
 
 
 class PmtError(Exception):
@@ -172,6 +173,19 @@ def title_from_body(body: str) -> str:
     return "(untitled)"
 
 
+def derive_session() -> Tuple[str, bool]:
+    env = os.environ.get("PMT_SESSION")
+    if env:
+        return env, True
+    try:
+        ppid = os.getppid()
+        stat = Path(f"/proc/{ppid}/stat").read_text(encoding="utf-8")
+        rest = stat[stat.rindex(")") + 2 :].split()
+        return f"pid-{rest[1]}", True
+    except Exception:
+        return f"session-{os.getppid()}", False
+
+
 class Context:
     def __init__(self, args: argparse.Namespace) -> None:
         docs_arg = getattr(args, "docs_root", None) or os.environ.get("PMT_DOCS_ROOT")
@@ -179,18 +193,20 @@ class Context:
         self.projects_root = self.docs_root / "projects"
         self.worklog_root = self.docs_root / "worklog"
         self.times_root = self.docs_root / "times"
-        self.session = getattr(args, "session", None) or os.environ.get("PMT_SESSION") or f"session-{os.getpid()}"
+        session = getattr(args, "session", None)
+        if session:
+            self.session, self.session_stable = session, True
+        else:
+            self.session, self.session_stable = derive_session()
+        self.session_warning_emitted = False
         self.project = getattr(args, "project", None) or self.detect_project()
 
     def detect_project(self) -> Optional[str]:
-        path = self.docs_root / "projects"
         try:
-            path = Path.cwd()
-            cwd = path.resolve()
-            path = self.docs_root / "projects"
-            root = path.resolve()
+            cwd = Path.cwd().resolve()
+            root = (self.docs_root / "projects").resolve()
         except Exception as exc:
-            print(f"경고: {path} {exc}", file=sys.stderr)
+            print(f"경고: {self.docs_root / 'projects'} {exc}", file=sys.stderr)
             return None
         try:
             rel = cwd.relative_to(root)
@@ -461,8 +477,14 @@ def lock_owned(base: Path, item_id: str, session: str) -> bool:
     return bool(meta and meta.get("session") == session)
 
 
-def require_lock_owner(base: Path, item_id: str, session: str) -> None:
-    if not lock_owned(base, item_id, session):
+def require_lock_owner(base: Path, item_id: str, ctx: Context) -> None:
+    if not ctx.session_stable:
+        if not ctx.session_warning_emitted:
+            print("주의: 세션 식별 불안정 — PMT_SESSION 설정 권장", file=sys.stderr)
+            ctx.session_warning_emitted = True
+        if (base / lock_name(item_id)).exists():
+            return
+    if not lock_owned(base, item_id, ctx.session):
         raise PmtError(f"lock not owned by session: {item_id}", 1)
 
 
@@ -605,6 +627,7 @@ def promote_parents(project_dir: Path, item_id: str) -> None:
 def cmd_start(ctx: Context, args: argparse.Namespace) -> int:
     project_dir = ctx.project_dir()
     item_id = args.item_id
+    lock_base = project_lock_base(project_dir)
     path = id_to_path(project_dir, item_id)
     if not path.exists():
         raise PmtError(f"missing item: {item_id}", 1)
@@ -621,7 +644,28 @@ def cmd_start(ctx: Context, args: argparse.Namespace) -> int:
             missing.append("verify")
         if missing:
             raise PmtError("delegate gate failed: " + ", ".join(missing), 2)
-    if not acquire_lock(project_lock_base(project_dir), item_id, ctx.session):
+    stale_owned = sorted(
+        str(row.get("id"))
+        for row in read_locks(lock_base)
+        if row.get("session") == ctx.session
+        and not str(row.get("id", "")).startswith("__")
+        and row.get("id") != item_id
+        and lock_age_minutes(row) >= STALE_MINUTES
+    )
+    if stale_owned:
+        stale_id = stale_owned[0]
+        raise PmtError(
+            f"먼저 pmt note {stale_id} --did --next 또는 pmt end {stale_id} --pause",
+            2,
+        )
+    acquired = acquire_lock(lock_base, item_id, ctx.session)
+    if not acquired:
+        existing = lock_meta(lock_base, item_id)
+        if existing and lock_age_minutes(existing) >= STALE_MINUTES:
+            if reap_lock(ctx, lock_base, item_id, project_scoped=True):
+                fm, body = read_doc(path)
+                acquired = acquire_lock(lock_base, item_id, ctx.session)
+    if not acquired:
         print(f"lock busy: {item_id}", file=sys.stderr)
         return 1
     backup_docs = {
@@ -646,7 +690,7 @@ def cmd_start(ctx: Context, args: argparse.Namespace) -> int:
             log_path.unlink()
         elif old_log is not None:
             log_path.write_text(old_log, encoding="utf-8")
-        release_lock(project_lock_base(project_dir), item_id)
+        release_lock(lock_base, item_id)
         raise
     print_context(ctx, path, item_id)
     return 0
@@ -678,7 +722,7 @@ def write_resume_block(path: Path, session: str, did: str, next_step: str, watch
 def cmd_note(ctx: Context, args: argparse.Namespace) -> int:
     project_dir = ctx.project_dir()
     path = id_to_path(project_dir, args.item_id)
-    require_lock_owner(project_lock_base(project_dir), args.item_id, ctx.session)
+    require_lock_owner(project_lock_base(project_dir), args.item_id, ctx)
     write_resume_block(path, ctx.session, args.did, args.next_step, args.watch, args.wait, args.unverified)
     update_lock(project_lock_base(project_dir), args.item_id, ctx.session)
     append_worklog(ctx, args.item_id, "체크포인트", [f"한 것: {args.did}", f"다음: {args.next_step}", f"주의: {args.watch or '없음'}"])
@@ -714,7 +758,7 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
     if args.done:
         if not args.result:
             raise PmtError("--done requires --result", 2)
-        require_lock_owner(project_lock_base(project_dir), args.item_id, ctx.session)
+        require_lock_owner(project_lock_base(project_dir), args.item_id, ctx)
         incomplete = sorted(
             item_id
             for item_id, node in scan_docs(project_dir).items()
@@ -739,7 +783,7 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
         print(f"done {args.item_id}")
         return 0
     if args.pause:
-        require_lock_owner(project_lock_base(project_dir), args.item_id, ctx.session)
+        require_lock_owner(project_lock_base(project_dir), args.item_id, ctx)
         resume = section_text(body, "재개")
         resume_age = resume_age_minutes(resume)
         if args.did and args.next_step:
@@ -754,7 +798,7 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
     if args.fail:
         if not args.cause or not args.fix:
             raise PmtError("--fail requires --cause and --fix", 2)
-        require_lock_owner(project_lock_base(project_dir), args.item_id, ctx.session)
+        require_lock_owner(project_lock_base(project_dir), args.item_id, ctx)
         text = f"실패 원인: {args.cause}; 처방: {args.fix}"
         write_resume_block(path, ctx.session, text, args.fix, text, args.wait, args.unverified)
         append_worklog(ctx, args.item_id, "실패", [text])
@@ -765,7 +809,7 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
     if args.skip:
         if not args.reason:
             raise PmtError("--skip requires --reason", 2)
-        require_lock_owner(project_lock_base(project_dir), args.item_id, ctx.session)
+        require_lock_owner(project_lock_base(project_dir), args.item_id, ctx)
         children = sorted(
             item_id
             for item_id, node in scan_docs(project_dir).items()
@@ -976,8 +1020,47 @@ def cmd_sync(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def cmd_lock(ctx: Context, args: argparse.Namespace) -> int:
-    base = repo_lock_base(ctx) if args.repo else project_lock_base(ctx.project_dir())
-    item_id = str(Path(args.repo).resolve()) if args.repo else args.item_id
+    repo_ids = sorted(str(Path(path).resolve()) for path in (args.repo or []))
+    if args.lock_kind == "list":
+        bases = []
+        if ctx.project and ctx.project_dir().is_dir():
+            bases.append(project_lock_base(ctx.project_dir()))
+        bases.append(repo_lock_base(ctx))
+        for base in bases:
+            for row in read_locks(base):
+                print(json.dumps(row, ensure_ascii=False))
+        return 0
+    if args.lock_kind == "reap":
+        if repo_ids:
+            return reap_locks(ctx, repo_lock_base(ctx), project_scoped=False)
+        return reap_locks(ctx, project_lock_base(ctx.project_dir()), project_scoped=True)
+    if repo_ids:
+        base = repo_lock_base(ctx)
+        if args.lock_kind == "acquire":
+            acquired = []
+            for item_id in repo_ids:
+                if not acquire_lock(base, item_id, ctx.session):
+                    for held in reversed(acquired):
+                        release_lock(base, held, ctx.session)
+                    print(f"busy {item_id}")
+                    return 1
+                acquired.append(item_id)
+            for item_id in acquired:
+                print(f"acquired {item_id}")
+            return 0
+        targets = list(reversed(repo_ids)) if args.lock_kind == "release" else repo_ids
+        results = []
+        for item_id in targets:
+            if args.lock_kind == "beat":
+                ok = update_lock(base, item_id, ctx.session)
+                print(f"{'beat' if ok else 'not-owned'} {item_id}")
+            else:
+                ok = release_lock(base, item_id, ctx.session)
+                print(f"{'released' if ok else 'not-owned'} {item_id}")
+            results.append(ok)
+        return 0 if all(results) else 1
+    base = project_lock_base(ctx.project_dir())
+    item_id = args.item_id
     if args.lock_kind in {"acquire", "beat", "release"} and not item_id:
         raise PmtError("lock id or --repo is required", 2)
     if args.lock_kind == "acquire":
@@ -992,33 +1075,32 @@ def cmd_lock(ctx: Context, args: argparse.Namespace) -> int:
         ok = release_lock(base, item_id, ctx.session)
         print("released" if ok else "not-owned")
         return 0 if ok else 1
-    if args.lock_kind == "list":
-        for row in read_locks(base):
-            print(json.dumps(row, ensure_ascii=False))
-        return 0
-    if args.lock_kind == "reap":
-        return reap_locks(ctx, base, project_lock_base(ctx.project_dir()) == base)
     return 0
+
+
+def reap_lock(ctx: Context, base: Path, item_id: str, project_scoped: bool) -> bool:
+    meta = lock_meta(base, item_id)
+    if not meta or lock_age_minutes(meta) < STALE_MINUTES:
+        return False
+    if project_scoped:
+        path = ctx.project_dir() / item_id
+        try:
+            path = id_to_path(ctx.project_dir(), item_id)
+            fm, body = read_doc(path)
+            resume = section_text(body, "재개")
+            line = f"- 비정상 종료 추정 (abnormal exit suspected): 마지막 체크포인트 {meta.get('heartbeat')}, 이후 작업 미기록"
+            body = replace_section(body, "재개", line + "\n" + resume)
+            write_doc(path, fm, body)
+        except Exception as exc:
+            print(f"경고: {path} {exc}", file=sys.stderr)
+    return release_lock(base, item_id)
 
 
 def reap_locks(ctx: Context, base: Path, project_scoped: bool) -> int:
     count = 0
     for row in read_locks(base):
-        if not row.get("stale"):
-            continue
-        if project_scoped:
-            path = ctx.project_dir() / str(row.get("id", ""))
-            try:
-                path = id_to_path(ctx.project_dir(), row["id"])
-                fm, body = read_doc(path)
-                resume = section_text(body, "재개")
-                line = f"- 비정상 종료 추정 (abnormal exit suspected): 마지막 체크포인트 {row.get('heartbeat')}, 이후 작업 미기록"
-                body = replace_section(body, "재개", line + "\n" + resume)
-                write_doc(path, fm, body)
-            except Exception as exc:
-                print(f"경고: {path} {exc}", file=sys.stderr)
-        shutil.rmtree(Path(row["path"]))
-        count += 1
+        if row.get("stale") and reap_lock(ctx, base, str(row.get("id")), project_scoped):
+            count += 1
     if project_scoped:
         sync(ctx, ctx.project_dir())
     print(f"reaped {count}")
@@ -1286,7 +1368,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p = sub.add_parser("lock")
     p.add_argument("lock_kind", choices=["acquire", "beat", "release", "list", "reap"])
     p.add_argument("item_id", nargs="?")
-    p.add_argument("--repo")
+    p.add_argument("--repo", action="append")
 
     p = sub.add_parser("find")
     p.add_argument("query")
@@ -1301,6 +1383,18 @@ def main(argv: Sequence[str] = sys.argv[1:]) -> int:
     try:
         args = parse_args(argv)
         ctx = Context(args)
+        if not ctx.project and args.command == "resume":
+            ctx.project = args.slug
+        if ctx.project and ctx.project_dir().is_dir():
+            rows = sorted(read_locks(project_lock_base(ctx.project_dir())), key=lambda row: str(row.get("id")))
+            for row in rows:
+                item_id = str(row.get("id", ""))
+                age = lock_age_minutes(row)
+                if row.get("session") == ctx.session and not item_id.startswith("__") and age >= WARN_MINUTES:
+                    print(
+                        f"주의: {item_id} 체크포인트 {int(age)}분 경과 — pmt note {item_id} --did ... --next ...",
+                        file=sys.stderr,
+                    )
         handlers = {
             "new": cmd_new,
             "resume": cmd_resume,

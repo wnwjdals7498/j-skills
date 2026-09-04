@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 import os
 import subprocess
@@ -28,14 +29,28 @@ class PmtTest(unittest.TestCase):
             str(PMT),
             "--docs-root",
             str(self.docs),
-            "--session",
-            session,
-            *args,
         ]
-        proc = subprocess.run(cmd, text=True, capture_output=True)
+        if session is not None:
+            cmd.extend(["--session", session])
+        cmd.extend(args)
+        env = os.environ.copy()
+        if session is None:
+            env.pop("PMT_SESSION", None)
+        proc = subprocess.run(cmd, text=True, capture_output=True, env=env)
         if ok and proc.returncode != 0:
             self.fail(f"{cmd} failed\nstdout={proc.stdout}\nstderr={proc.stderr}")
         return proc
+
+    def set_lock_heartbeat(self, root, item_id, minutes):
+        heartbeat = (dt.datetime.now() - dt.timedelta(minutes=minutes)).replace(microsecond=0)
+        for meta_path in root.glob("*.lock/lock.json"):
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+            if data.get("id") != item_id:
+                continue
+            data["heartbeat"] = heartbeat.isoformat(timespec="minutes")
+            meta_path.write_text(json.dumps(data), encoding="utf-8")
+            return
+        self.fail(f"missing lock: {item_id}")
 
     def make_item(self, slug="alpha", title="First item"):
         self.run_pmt("new", slug, "--goal", "ship alpha")
@@ -336,6 +351,165 @@ class PmtTest(unittest.TestCase):
 
         self.assertIn("status: In Progress", project.read_text(encoding="utf-8"))
         self.assertIn(item, resume.read_text(encoding="utf-8"))
+
+    def test_default_session_is_stable_across_calls(self):
+        slug, _work, item = self.make_item(slug="stable-session")
+
+        self.run_pmt("--project", slug, "start", item, session=None)
+        noted = self.run_pmt(
+            "--project",
+            slug,
+            "note",
+            item,
+            "--did",
+            "started without explicit session",
+            "--next",
+            "continue with derived session",
+            session=None,
+        )
+
+        self.assertEqual(noted.returncode, 0)
+        self.assertIn("noted", noted.stdout)
+        lock_data = next(
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (self.docs / "projects" / slug / ".locks").glob("*.lock/lock.json")
+        )
+        self.assertEqual(lock_data["session"], f"pid-{os.getppid()}")
+
+    def test_start_reaps_stale_lock_and_marks_abnormal_exit(self):
+        slug, work, item = self.make_item(slug="stale-start")
+        other = self.run_pmt("--project", slug, "add", "item", work, "Other").stdout.strip()
+        self.run_pmt("--project", slug, "start", item, session="lost")
+        self.run_pmt("--project", slug, "start", other, session="other-owner")
+        locks = self.docs / "projects" / slug / ".locks"
+        self.set_lock_heartbeat(locks, item, 40)
+        self.set_lock_heartbeat(locks, other, 40)
+
+        restarted = self.run_pmt("--project", slug, "start", item, session="new")
+        item_path = self.docs / "projects" / slug / "_default" / "Work1-1.md"
+        lock_data = {
+            data["id"]: data
+            for path in locks.glob("*.lock/lock.json")
+            for data in [json.loads(path.read_text(encoding="utf-8"))]
+        }
+
+        self.assertEqual(restarted.returncode, 0)
+        self.assertIn("비정상 종료 추정", item_path.read_text(encoding="utf-8"))
+        self.assertEqual(lock_data[item]["session"], "new")
+        self.assertEqual(lock_data[other]["session"], "other-owner")
+
+    def test_stale_warning_printed_on_any_command(self):
+        slug, _work, item = self.make_item(slug="warning")
+        self.run_pmt("--project", slug, "start", item)
+        locks = self.docs / "projects" / slug / ".locks"
+        self.set_lock_heartbeat(locks, item, 25)
+
+        result = self.run_pmt("--project", slug, "doctor")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stderr.splitlines()[0].startswith(f"주의: {item} 체크포인트"))
+
+    def test_start_gate_blocks_when_other_item_stale_then_passes_after_note(self):
+        slug, work, first = self.make_item(slug="start-gate")
+        second = self.run_pmt("--project", slug, "add", "item", work, "Second").stdout.strip()
+        self.run_pmt("--project", slug, "start", first, session="gate")
+        locks = self.docs / "projects" / slug / ".locks"
+        self.set_lock_heartbeat(locks, first, 40)
+
+        blocked = self.run_pmt("--project", slug, "start", second, session="gate", ok=False)
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn(
+            f"먼저 pmt note {first} --did --next 또는 pmt end {first} --pause",
+            blocked.stderr,
+        )
+
+        self.run_pmt(
+            "--project",
+            slug,
+            "note",
+            first,
+            "--did",
+            "checkpoint refreshed",
+            "--next",
+            "start second item",
+            session="gate",
+        )
+        started = self.run_pmt("--project", slug, "start", second, session="gate")
+        self.assertEqual(started.returncode, 0)
+
+    def test_repo_lock_conflict_release_reap(self):
+        slug, _work, item = self.make_item(slug="repo-lock")
+        self.run_pmt("--project", slug, "start", item, session="owner")
+        repo = self.docs / "repos" / "one"
+        repo.mkdir(parents=True)
+        repo_id = str(repo.resolve())
+
+        self.run_pmt("lock", "acquire", "--repo", str(repo), session="owner")
+        conflict = self.run_pmt("lock", "acquire", "--repo", str(repo), session="other", ok=False)
+        listed = self.run_pmt("--project", slug, "lock", "list", session="viewer")
+        wrong_release = self.run_pmt(
+            "lock", "release", "--repo", str(repo), session="other", ok=False
+        )
+
+        self.assertEqual(conflict.returncode, 1)
+        self.assertEqual(wrong_release.returncode, 1)
+        self.assertIn(item, listed.stdout)
+        self.assertIn(repo_id, listed.stdout)
+
+        self.run_pmt("lock", "release", "--repo", str(repo), session="owner")
+        self.run_pmt("lock", "acquire", "--repo", str(repo), session="owner")
+        self.set_lock_heartbeat(self.docs / ".repo-locks", repo_id, 40)
+        reaped = self.run_pmt("lock", "reap", "--repo", str(repo), session="other")
+        reacquired = self.run_pmt("lock", "acquire", "--repo", str(repo), session="other")
+
+        self.assertIn("reaped 1", reaped.stdout)
+        self.assertEqual(reacquired.returncode, 0)
+
+    def test_repo_lock_multi_sorted_acquire_and_rollback(self):
+        repo_a = self.docs / "repos" / "a"
+        repo_b = self.docs / "repos" / "b"
+        repo_a.mkdir(parents=True)
+        repo_b.mkdir(parents=True)
+        repo_ids = sorted([str(repo_a.resolve()), str(repo_b.resolve())])
+
+        acquired = self.run_pmt(
+            "lock",
+            "acquire",
+            "--repo",
+            str(repo_b),
+            "--repo",
+            str(repo_a),
+            session="multi",
+        )
+        self.assertEqual(acquired.stdout.splitlines(), [f"acquired {item}" for item in repo_ids])
+
+        beaten = self.run_pmt(
+            "lock", "beat", "--repo", str(repo_b), "--repo", str(repo_a), session="multi"
+        )
+        self.assertEqual(beaten.stdout.splitlines(), [f"beat {item}" for item in repo_ids])
+
+        released = self.run_pmt(
+            "lock", "release", "--repo", str(repo_a), "--repo", str(repo_b), session="multi"
+        )
+        self.assertEqual(released.stdout.splitlines(), [f"released {item}" for item in reversed(repo_ids)])
+
+        self.run_pmt("lock", "acquire", "--repo", str(repo_b), session="blocker")
+        failed = self.run_pmt(
+            "lock",
+            "acquire",
+            "--repo",
+            str(repo_b),
+            "--repo",
+            str(repo_a),
+            session="contender",
+            ok=False,
+        )
+        listed = self.run_pmt("lock", "list", session="viewer")
+        locked_ids = {json.loads(line)["id"] for line in listed.stdout.splitlines()}
+
+        self.assertEqual(failed.returncode, 1)
+        self.assertNotIn(repo_ids[0], locked_ids)
+        self.assertIn(repo_ids[1], locked_ids)
 
     def test_parallel_sync_writes_resume_and_doctor_passes(self):
         slug, _work, _item = self.make_item()

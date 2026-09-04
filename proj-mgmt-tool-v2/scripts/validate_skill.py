@@ -30,15 +30,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         "SKILL.md",
         "agents/openai.yaml",
         "scripts/pmt.py",
+        "scripts/migrate_v1.py",
         "references/pmt-v2-contract.md",
         "references/migration-v1.md",
         "references/acceptance-tests.md",
-        "assets/templates/project.md",
-        "assets/templates/work.md",
-        "assets/templates/item.md",
-        "assets/templates/facts.md",
-        "assets/templates/decisions.md",
-        "assets/templates/backlog.md",
     ]
     for rel in required:
         if not (root / rel).exists():
@@ -62,7 +57,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     pmt = pmt_path.read_text(encoding="utf-8")
     if unfinished_marker in pmt or scaffold_marker in pmt.lower():
         fail("pmt.py contains unfinished scaffold text")
-    for rel in ("scripts/pmt.py", "scripts/validate_skill.py", "tests/test_pmt.py"):
+    for rel in ("scripts/pmt.py", "scripts/migrate_v1.py", "scripts/validate_skill.py", "tests/test_pmt.py"):
         if (root / rel).exists():
             py_compile.compile(str(root / rel), doraise=True)
 

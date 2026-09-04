@@ -149,127 +149,6 @@ class PmtTest(unittest.TestCase):
         self.assertIn(target, after)
         self.assertIn("archive", after)
 
-    def test_migrate_v1_dry_run_is_read_only_and_apply_maps_progress_notes(self):
-        slug = "legacy"
-        project = self.docs / "projects" / slug
-        item_dir = project / "_default"
-        item_dir.mkdir(parents=True)
-        work = item_dir / "Work1.md"
-        work.write_text(
-            "---\n"
-            "type: work\n"
-            "id: legacy/_default/Work1\n"
-            "parent: legacy/_default\n"
-            "status: In Progress\n"
-            "updated: 2026-09-02\n"
-            "---\n"
-            "# Work1 legacy\n"
-            "## Goal\n"
-            "- migrate\n",
-            encoding="utf-8",
-        )
-        item = item_dir / "Work1-J1.md"
-        item.write_text(
-            "---\n"
-            "type: item\n"
-            "id: legacy/_default/Work1-J1\n"
-            "parent: legacy/_default/Work1\n"
-            "status: In Progress\n"
-            "updated: 2026-09-02\n"
-            "---\n"
-            "# J1 legacy\n"
-            "## 진행 메모\n"
-            "- 한 것: old did\n"
-            "- 다음: old next\n",
-            encoding="utf-8",
-        )
-        before = item.read_text(encoding="utf-8")
-
-        self.run_pmt("migrate", "v1", slug)
-        self.assertEqual(before, item.read_text(encoding="utf-8"))
-
-        self.run_pmt("migrate", "v1", slug, "--apply")
-        migrated = item.read_text(encoding="utf-8")
-        self.assertIn("kind: job", migrated)
-        self.assertIn("## 재개", migrated)
-        self.assertIn("old did", migrated)
-
-    def test_migrate_v1_merges_lists_handoffs_worklogs_and_refs_losslessly(self):
-        slug = "legacyfull"
-        project = self.docs / "projects" / slug
-        item_dir = project / "_default"
-        item_dir.mkdir(parents=True)
-        (project / "project.md").write_text(
-            "---\ntype: project\nid: legacyfull\nstatus: Planned\nupdated: 2026-09-02\n---\n"
-            "# legacyfull\n## Goal\n- migrate all v1 data\n## Non-Goal\n-\n## 결과\n-\n",
-            encoding="utf-8",
-        )
-        (item_dir / "Work1.md").write_text(
-            "---\ntype: work\nid: legacyfull/_default/Work1\nparent: legacyfull/_default\n"
-            "status: In Progress\nupdated: 2026-09-02\n---\n# Work1\n## Goal\n- migrate\n",
-            encoding="utf-8",
-        )
-        item = item_dir / "Work1-J1.md"
-        item.write_text(
-            "---\ntype: item\nid: legacyfull/_default/Work1-J1\n"
-            "parent: legacyfull/_default/Work1\nstatus: In Progress\nupdated: 2026-09-02\n"
-            "list_refs: [requirements.md#R7, Information.md#IF2]\n---\n"
-            "# J1\n## 진행 메모\n- 한 것: legacy work\n- 다음: migrate\n",
-            encoding="utf-8",
-        )
-        legacy_lists = {
-            "Information.md": "# Information\n| ID | 상태 | 생성 | 내용 |\n|---|---|---|---|\n| IF2 | Done | 2026-08-01 | durable fact |\n",
-            "histories.md": "# Histories\n| ID | 상태 | 생성 | 내용 |\n|---|---|---|---|\n| H4 | Done | 2026-08-02 | durable decision |\n",
-            "requirements.md": "# Requirements\n| ID | 상태 | 생성 | 내용 |\n|---|---|---|---|\n| R7 | In Progress | 2026-08-03 | required behavior |\n",
-            "todos.md": "# Todos\n| ID | 상태 | 생성 | 내용 |\n|---|---|---|---|\n| T3 | Planned | 2026-08-04 | follow-up work |\n",
-            "plans.md": "# Plans\n| ID | 상태 | 생성 | 내용 |\n|---|---|---|---|\n| P2 | Done | 2026-08-05 | rollout plan |\n",
-            "issues.md": "# Issues\n| ID | 상태 | 생성 | 내용 |\n|---|---|---|---|\n| I8 | Active | 2026-08-06 | open issue |\n",
-            "Bugs.md": "# Bugs\n| ID | 상태 | 생성 | 내용 |\n|---|---|---|---|\n| BG9 | Active | 2026-08-07 | bad edge |\n\n## 점검 특징\n- restart-sensitive\n",
-        }
-        for name, content in legacy_lists.items():
-            (project / name).write_text(content, encoding="utf-8")
-        (project / "works.md").write_text("legacy generated index", encoding="utf-8")
-        (project / "classifications.md").write_text("legacy class index", encoding="utf-8")
-
-        handoff = self.docs / "handoff-legacyfull-Work1-J1.md"
-        handoff.write_text(
-            "target legacyfull/_default/Work1-J1\ncritical handoff warning",
-            encoding="utf-8",
-        )
-        worklog = self.docs / "worklog" / "legacyfull_Work1-J1.md"
-        worklog.parent.mkdir(parents=True)
-        worklog.write_text("# log\nlegacyfull/_default/Work1-J1\n- work happened\n", encoding="utf-8")
-
-        result = self.run_pmt("migrate", "v1", slug, "--apply")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for name in legacy_lists:
-            self.assertFalse((project / name).exists(), name)
-        backlog = (project / "backlog.md").read_text(encoding="utf-8")
-        self.assertIn("[R7] required behavior", backlog)
-        self.assertIn("[T3] follow-up work", backlog)
-        self.assertIn("[BG9] bad edge", backlog)
-        self.assertIn("restart-sensitive", backlog)
-        self.assertIn("[IF2] durable fact", (project / "facts.md").read_text(encoding="utf-8"))
-        self.assertIn("[H4] durable decision", (project / "decisions.md").read_text(encoding="utf-8"))
-        migrated_item = item.read_text(encoding="utf-8")
-        self.assertRegex(migrated_item, r"list_refs: \[backlog\.md#B\d+, facts\.md#F\d+\]")
-        self.assertIn("critical handoff warning", migrated_item)
-        self.assertTrue((project / "resources" / "derived" / "handoff-archive" / handoff.name).exists())
-        self.assertTrue((self.docs / "worklog" / "legacyfull___default__Work1-J1.md").exists())
-        self.assertFalse((project / "works.md").exists())
-        self.assertFalse((project / "classifications.md").exists())
-        self.assertEqual(self.run_pmt("--project", slug, "doctor").returncode, 0)
-
-    def test_migrate_v1_warns_and_preserves_unresolved_handoff(self):
-        slug, _work, _item = self.make_item(slug="ambiguous")
-        handoff = self.docs / "handoff-ambiguous-unknown.md"
-        handoff.write_text("ambiguous project handoff with no item id", encoding="utf-8")
-
-        result = self.run_pmt("migrate", "v1", slug, "--apply")
-
-        self.assertIn("WARN migration: unresolved handoff preserved", result.stdout)
-        self.assertTrue(handoff.exists())
-
     def test_validate_skill_passes_and_can_run_tests(self):
         proc = subprocess.run([sys.executable, str(VALIDATE), str(ROOT)], text=True, capture_output=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -303,19 +182,7 @@ class PmtTest(unittest.TestCase):
         self.assertTrue((self.docs / "projects" / slug / "canceled" / "Work1-1-1.md").exists())
         self.assertEqual(self.run_pmt("--project", slug, "doctor").returncode, 0)
 
-    def test_start_prints_related_worklog_followup_impacts(self):
-        slug, work, first = self.make_item()
-        second = self.run_pmt("--project", slug, "add", "item", work, "Second").stdout.strip()
-        self.run_pmt("--project", slug, "start", first)
-        log = self.docs / "worklog" / "alpha___default__Work1-1.md"
-        with log.open("a", encoding="utf-8") as handle:
-            handle.write("- 후속 영향: parser API changed\n")
-        self.run_pmt("--project", slug, "end", first, "--done", "--result", "done")
-
-        started = self.run_pmt("--project", slug, "start", second)
-        self.assertIn("parser API changed", started.stdout)
-
-    def test_parallel_sync_waits_and_graph_has_no_virtual_class_orphan(self):
+    def test_parallel_sync_writes_resume_and_doctor_passes(self):
         slug, _work, _item = self.make_item()
         barrier = threading.Barrier(4)
         results = []
@@ -331,9 +198,8 @@ class PmtTest(unittest.TestCase):
             thread.join()
 
         self.assertEqual([proc.returncode for proc in results], [0, 0, 0, 0])
-        graph = json.loads((self.docs / "projects" / slug / "graph.json").read_text(encoding="utf-8"))
-        self.assertIn(f"{slug}/_default/Work1", graph["nodes"])
-        self.assertNotIn(f"{slug}/_default/Work1", self.run_pmt("--project", slug, "graph", "orphans").stdout)
+        self.assertTrue((self.docs / "projects" / slug / "RESUME.md").exists())
+        self.assertEqual(self.run_pmt("--project", slug, "doctor").returncode, 0)
 
 
 if __name__ == "__main__":

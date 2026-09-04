@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"git diff --stat && echo \\\"--- migrate_v1 head ---\\\" && sed -n 1,60p proj-mgmt-tool-v2/scripts/migrate_v1.py && echo \\\"--- test_migrate_v1 head ---\\\" && sed -n 1,45p proj-mgmt-tool-v2/tests...",
+  "error": "Exit code 2\n proj-mgmt-tool-v2/assets/templates/backlog.md   |  14 -\n proj-mgmt-tool-v2/assets/templates/decisions.md |  11 -\n proj-mgmt-tool-v2/assets/templates/facts.md     |  11 -\n proj-mgmt-tool-v2/assets/templates/item.md      |  21 -\n proj-mgmt-tool-v2/assets/templates/project.md   |  15 -\n proj-mgmt-tool-v2/assets/templates/work.md      |  14 -\n proj-mgmt-tool-v2/scripts/pmt.py                | 634 +-----------------------\n proj-mgmt-tool-v2/scripts/validate_skill.py     |   9 +-\n proj-mg...",
+  "timestamp": "2026-09-04T08:47:14.417Z",
+  "retry_count": 1
+}

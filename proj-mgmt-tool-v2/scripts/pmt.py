@@ -22,9 +22,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-STATUSES_ACTIVE = {"Planned", "In Progress", "Blocked"}
 LIST_FILES = ("facts.md", "decisions.md", "backlog.md")
-GENERATED = {"RESUME.md", "graph.md", "graph.json", "Doing.md", "index.md"}
+GENERATED = {"RESUME.md"}
 STALE_MINUTES = 30
 
 
@@ -124,12 +123,7 @@ def render_frontmatter(data: Dict[str, Any], body: str) -> str:
         "repositories",
         "next_id",
         "verify",
-        "blocks",
         "blocked_by",
-        "related_to",
-        "list_refs",
-        "waiting_on",
-        "resolved_blockers",
         "linear_id",
     ]
     emitted = set()
@@ -239,10 +233,7 @@ def scan_docs(project_dir: Path) -> Dict[str, Dict[str, Any]]:
             "status": fm.get("status"),
             "parent": fm.get("parent"),
             "title": title_from_body(body),
-            "blocks": as_list(fm.get("blocks")),
             "blocked_by": as_list(fm.get("blocked_by")),
-            "related_to": as_list(fm.get("related_to")),
-            "waiting_on": fm.get("waiting_on"),
             "updated": fm.get("updated"),
             "resume": section_text(body, "재개"),
         }
@@ -530,6 +521,18 @@ def worklog_path(ctx: Context, item_id: str) -> Path:
     return ctx.worklog_root / f"{slug}__{class_name}__{name}.md"
 
 
+def unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for number in range(1, 1000):
+        candidate = path.with_name(f"{stem}-{number}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise PmtError(f"cannot allocate archive path for {path}", 1)
+
+
 def append_worklog(ctx: Context, item_id: str, heading: str, lines: Sequence[str]) -> None:
     ensure_dir(ctx.worklog_root)
     path = worklog_path(ctx, item_id)
@@ -628,29 +631,6 @@ def print_context(ctx: Context, path: Path, item_id: str) -> None:
         text = section_text(body, heading)
         if text:
             print(f"\n## {heading}\n{text}")
-    impacts = related_followup_impacts(ctx, item_id)
-    if impacts:
-        print("\n## 관련 과거 worklog 후속 영향")
-        for impact in impacts:
-            print(f"- {impact}")
-
-
-def related_followup_impacts(ctx: Context, item_id: str, limit: int = 10) -> List[str]:
-    parts = item_id.split("/")
-    component = parts[1] if len(parts) > 1 else "_default"
-    hits: List[Tuple[float, str]] = []
-    for root in (ctx.worklog_root, ctx.worklog_root / "done"):
-        if not root.exists():
-            continue
-        for log_path in root.glob(f"{parts[0]}__*.md"):
-            text = log_path.read_text(encoding="utf-8", errors="ignore")
-            front, _ = parse_frontmatter(text)
-            if component not in as_list(front.get("components")):
-                continue
-            for line in text.splitlines():
-                if "후속 영향" in line:
-                    hits.append((log_path.stat().st_mtime, f"{log_path.name}: {line.strip('- ')}"))
-    return [value for _, value in sorted(hits, reverse=True)[:limit]]
 
 
 def write_resume_block(path: Path, session: str, did: str, next_step: str, watch: Optional[str], wait: Optional[str], unverified: Optional[str]) -> None:
@@ -775,8 +755,7 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
         new_id = f"{project_dir.name}/canceled/{Path(path).stem}"
         fm["id"] = new_id
         fm["parent"] = f"{project_dir.name}/canceled"
-        for key in ("blocks", "blocked_by", "related_to"):
-            fm.pop(key, None)
+        fm.pop("blocked_by", None)
         body = replace_section(body, "결과", f"- skipped: {args.reason}")
         canceled_path = project_dir / "canceled" / path.name
         write_doc(canceled_path, fm, body)
@@ -812,16 +791,9 @@ def remove_active_relations(project_dir: Path, removed_id: str) -> None:
     for node in scan_docs(project_dir).values():
         path = Path(node["path"])
         fm, body = read_doc(path)
-        changed = False
-        for key in ("blocks", "blocked_by", "related_to"):
-            values = as_list(fm.get(key))
-            if removed_id in values:
-                fm[key] = [value for value in values if value != removed_id]
-                changed = True
-        blockers = as_list(fm.get("resolved_blockers"))
-        if changed and removed_id not in blockers:
-            fm["resolved_blockers"] = blockers + [removed_id]
-        if changed:
+        blocked_by = as_list(fm.get("blocked_by"))
+        if removed_id in blocked_by:
+            fm["blocked_by"] = [value for value in blocked_by if value != removed_id]
             fm["updated"] = today()
             write_doc(path, fm, body)
 
@@ -852,13 +824,7 @@ def auto_done_parents(project_dir: Path, item_id: str) -> None:
 
 
 def build_graph(project_dir: Path) -> Dict[str, Any]:
-    nodes = scan_docs(project_dir)
-    children: Dict[str, List[str]] = {k: [] for k in nodes}
-    for item_id, node in nodes.items():
-        parent = node.get("parent")
-        if parent in children:
-            children[parent].append(item_id)
-    return {"nodes": nodes, "children": children}
+    return {"nodes": scan_docs(project_dir)}
 
 
 def parent_exists(project_dir: Path, nodes: Dict[str, Dict[str, Any]], parent: Any) -> bool:
@@ -878,63 +844,16 @@ def sync(ctx: Context, project_dir: Path) -> None:
         raise PmtError("index lock busy", 1)
     try:
         graph = build_graph(project_dir)
-        (project_dir / "graph.json").write_text(json.dumps(graph, ensure_ascii=False, indent=2), encoding="utf-8")
-        (project_dir / "graph.md").write_text(render_graph_md(project_dir, graph), encoding="utf-8")
-        (project_dir / "Doing.md").write_text(render_doing(project_dir), encoding="utf-8")
-        (project_dir / "index.md").write_text(render_index(graph), encoding="utf-8")
         (project_dir / "RESUME.md").write_text(render_resume(ctx, project_dir, graph), encoding="utf-8")
         project_indexes(ctx)
     finally:
         release_lock(project_lock_base(project_dir), index_id, ctx.session)
-
-
-def render_graph_md(project_dir: Path, graph: Dict[str, Any]) -> str:
-    lines = ["# Graph", "## Roots"]
-    nodes = graph["nodes"]
-    children = graph["children"]
-    for item_id, node in sorted(nodes.items()):
-        if node.get("type") != "project" and node.get("status") in STATUSES_ACTIVE and not node.get("blocked_by"):
-            lines.append(f"- {item_id} ({node.get('status')}) {node.get('title')}")
-    lines.append("\n## Blocked")
-    for item_id, node in sorted(nodes.items()):
-        if node.get("blocked_by"):
-            lines.append(f"- {item_id} <- {', '.join(node.get('blocked_by') or [])}")
-    lines.append("\n## Orphans")
-    for item_id, node in sorted(nodes.items()):
-        parent = node.get("parent")
-        if parent and not parent_exists(project_dir, nodes, parent) and node.get("type") != "project":
-            lines.append(f"- {item_id} parent missing: {parent}")
-    lines.append("\n## Children")
-    for item_id, kids in sorted(children.items()):
-        if kids:
-            lines.append(f"- {item_id}: {', '.join(sorted(kids))}")
-    return "\n".join(lines) + "\n"
-
-
-def render_doing(project_dir: Path) -> str:
-    lines = ["# Doing", "| session | id | heartbeat | stale |", "|---|---|---|---|"]
-    for row in read_locks(project_lock_base(project_dir)):
-        if str(row.get("id", "")).startswith("__"):
-            continue
-        lines.append(f"| {row.get('session')} | {row.get('id')} | {row.get('heartbeat')} | {row.get('stale')} |")
-    return "\n".join(lines) + "\n"
-
-
-def render_index(graph: Dict[str, Any]) -> str:
-    lines = ["# Index"]
-    nodes = graph["nodes"]
-    for item_id, node in sorted(nodes.items()):
-        if node.get("type") in {"project", "work", "item"}:
-            lines.append(f"- {item_id} [{node.get('type')} {node.get('status')}] {node.get('title')}")
-    return "\n".join(lines) + "\n"
-
 
 def render_resume(ctx: Context, project_dir: Path, graph: Dict[str, Any]) -> str:
     nodes = graph["nodes"]
     active_work = sum(1 for n in nodes.values() if n.get("type") == "work" and n.get("status") == "In Progress")
     active_item = sum(1 for n in nodes.values() if n.get("type") == "item" and n.get("status") == "In Progress")
     locks = [row for row in read_locks(project_lock_base(project_dir)) if not str(row.get("id", "")).startswith("__")]
-    waiting = [(i, n) for i, n in nodes.items() if n.get("waiting_on")]
     project_goal = ""
     project_path = project_dir / "project.md"
     if project_path.exists():
@@ -945,7 +864,7 @@ def render_resume(ctx: Context, project_dir: Path, graph: Dict[str, Any]) -> str
         f"# RESUME - {project_dir.name} 생성 {timestamp()}",
         "## 30초 요약",
         f"- Goal: {project_goal}",
-        f"- 활성 Work {active_work} · In Progress Item {active_item} · 점유 중 {len(locks)} · 외부 대기 {len(waiting)} · 미정 필드 0",
+        f"- 활성 Work {active_work} · In Progress Item {active_item} · 점유 중 {len(locks)} · 미정 필드 0",
         "",
         "## 지금 점유 중 (Doing)",
         "| 세션 | 대상 | 경과 | 메모 |",
@@ -958,11 +877,6 @@ def render_resume(ctx: Context, project_dir: Path, graph: Dict[str, Any]) -> str
         if node.get("status") == "In Progress":
             lines.append(f"### {item_id} - {node.get('title')}")
             lines.append(node.get("resume") or "- 재개 정보 없음")
-    lines.append("\n## 외부 대기")
-    for item_id, node in waiting:
-        lines.append(f"- {item_id}: {node.get('waiting_on')}")
-    if not waiting:
-        lines.append("- 없음")
     lines.append("\n## 착수 가능 (선행 없음, 최대 10)")
     roots = 0
     for item_id, node in sorted(nodes.items()):
@@ -1023,64 +937,6 @@ def cmd_sync(ctx: Context, args: argparse.Namespace) -> int:
     sync(ctx, ctx.project_dir())
     print("synced")
     return 0
-
-
-def cmd_graph(ctx: Context, args: argparse.Namespace) -> int:
-    project_dir = ctx.project_dir()
-    graph = build_graph(project_dir)
-    nodes = graph["nodes"]
-    children = graph["children"]
-    target = args.item_id
-    result: List[str] = []
-    if args.graph_kind == "roots":
-        result = [i for i, n in nodes.items() if n.get("type") != "project" and n.get("status") == "Planned" and not n.get("blocked_by")]
-    elif args.graph_kind == "blocked":
-        result = [f"{i}: {', '.join(n.get('blocked_by') or [])}" for i, n in nodes.items() if n.get("blocked_by")]
-    elif args.graph_kind == "orphans":
-        result = [
-            i
-            for i, n in nodes.items()
-            if n.get("parent") and not parent_exists(project_dir, nodes, n.get("parent")) and n.get("type") != "project"
-        ]
-    elif target:
-        if target not in nodes:
-            raise PmtError(f"missing id: {target}", 1)
-        if args.graph_kind == "children":
-            result = sorted(children.get(target, []))
-        elif args.graph_kind == "parents":
-            parent = nodes[target].get("parent")
-            result = [parent] if parent else []
-        elif args.graph_kind == "ancestors":
-            result = ancestors(nodes, target)
-        elif args.graph_kind == "descendants":
-            result = descendants(children, target)
-    else:
-        raise PmtError(f"{args.graph_kind} requires id", 2)
-    print("\n".join(result))
-    return 0
-
-
-def ancestors(nodes: Dict[str, Dict[str, Any]], item_id: str) -> List[str]:
-    out = []
-    seen = set()
-    current = item_id
-    while True:
-        parent = nodes.get(current, {}).get("parent")
-        if not parent or parent in seen:
-            return out
-        out.append(parent)
-        seen.add(parent)
-        current = parent
-
-
-def descendants(children: Dict[str, List[str]], item_id: str) -> List[str]:
-    out = []
-    stack = list(children.get(item_id, []))
-    while stack:
-        node = stack.pop(0)
-        out.append(node)
-        stack.extend(children.get(node, []))
-    return out
 
 
 def cmd_lock(ctx: Context, args: argparse.Namespace) -> int:
@@ -1212,17 +1068,14 @@ def doctor_collect(project_dir: Path) -> Tuple[List[str], List[str]]:
         except PmtError as exc:
             failures.append(f"{item_id}: {exc}")
         parent = fm.get("parent")
-        if parent and parent not in nodes:
+        if not parent_exists(project_dir, nodes, parent):
             if fm.get("type") == "work":
-                parent_parts = str(parent).split("/")
-                if len(parent_parts) != 2 or parent_parts[0] != project_dir.name or not (project_dir / parent_parts[1]).is_dir():
-                    failures.append(f"{item_id}: missing classification parent {parent}")
+                failures.append(f"{item_id}: missing classification parent {parent}")
             else:
                 failures.append(f"{item_id}: missing parent {parent}")
-        for key in ("blocks", "blocked_by", "related_to"):
-            for rel in as_list(fm.get(key)):
-                if rel not in nodes:
-                    failures.append(f"{item_id}: missing relation {key}={rel}")
+        for rel in as_list(fm.get("blocked_by")):
+            if rel not in nodes:
+                failures.append(f"{item_id}: missing relation blocked_by={rel}")
         if fm.get("type") == "item":
             depth = len(str(item_id).split("/")[-1].split("-")) - 1
             if depth > 3:
@@ -1310,428 +1163,12 @@ def cmd_doctor(ctx: Context, args: argparse.Namespace) -> int:
     return doctor(ctx, ctx.project_dir(), scope=args.scope)
 
 
-def cmd_close(ctx: Context, args: argparse.Namespace) -> int:
-    if not args.confirm:
-        raise PmtError("close requires --confirm", 2)
-    project_dir = ctx.project_dir(args.slug or ctx.project)
-    fm, body = read_doc(project_dir / "project.md")
-    repos = as_list(fm.get("repositories"))
-    if repos and not args.remote_synced:
-        raise PmtError("remote targets configured; pass --remote-synced after explicit upsert", 2)
-    fm["status"] = "Done"
-    fm["updated"] = today()
-    write_doc(project_dir / "project.md", fm, body)
-    sync(ctx, project_dir)
-    print(f"closed {project_dir.name}")
-    return 0
-
-
-def cmd_migrate(ctx: Context, args: argparse.Namespace) -> int:
-    if args.migrate_kind != "v1":
-        raise PmtError("only migrate v1 is supported", 2)
-    project_dir = ctx.project_dir(args.slug or ctx.project)
-    actions = collect_migration_actions(project_dir)
-    if not args.apply:
-        print("dry-run")
-        for item in actions:
-            print(item)
-        return 0
-    backup = project_dir / ".migration-v1-backup" / timestamp().replace(":", "")
-    ensure_dir(backup.parent)
-    shutil.copytree(project_dir, backup, ignore=shutil.ignore_patterns(".migration-v1-backup"))
-    migration_warnings = apply_migration(ctx, project_dir)
-    sync(ctx, project_dir)
-    code = doctor(ctx, project_dir)
-    for warning in migration_warnings:
-        print(f"WARN migration: {warning}")
-    print(f"backup: {backup}")
-    return code
-
-
-def collect_migration_actions(project_dir: Path) -> List[str]:
-    actions = []
-    for old, new in [("Information.md", "facts.md"), ("histories.md", "decisions.md")]:
-        if (project_dir / old).exists():
-            actions.append(f"merge {old} -> {new}")
-    for old in ["requirements.md", "todos.md", "plans.md", "issues.md", "Bugs.md"]:
-        if (project_dir / old).exists():
-            actions.append(f"merge {old} -> backlog.md")
-    for old in ["works.md", "classifications.md"]:
-        if (project_dir / old).exists():
-            actions.append(f"remove generated v1 index {old}")
-    for path in project_dir.rglob("*.md"):
-        if path.name in GENERATED:
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        if "## 진행 메모" in text:
-            actions.append(f"convert resume block {path}")
-        if re.search(r"^kind:\s*(V|J|TE|HF)\s*$", text, re.M):
-            actions.append(f"convert item kind {path}")
-        if "list_refs:" in text:
-            actions.append(f"rewrite list_refs {path}")
-    if not actions:
-        actions.append("no v1-only structures detected")
-    return actions
-
-
-def apply_migration(ctx: Context, project_dir: Path) -> List[str]:
-    for name in LIST_FILES:
-        if not (project_dir / name).exists():
-            (project_dir / name).write_text(list_template(name[:-3], project_dir.name), encoding="utf-8")
-    id_map: Dict[str, str] = {}
-    id_map.update(merge_v1_list(project_dir, "Information.md", "facts.md", "F"))
-    id_map.update(merge_v1_list(project_dir, "histories.md", "decisions.md", "D"))
-    for old_name, kind in [
-        ("requirements.md", "req"),
-        ("todos.md", "todo"),
-        ("plans.md", "plan"),
-        ("issues.md", "issue"),
-        ("Bugs.md", "bug"),
-    ]:
-        id_map.update(merge_v1_backlog(project_dir, old_name, kind))
-    mapping = {"V": "view", "J": "job", "TE": "test", "HF": "hotfix"}
-    for path in project_dir.rglob("*.md"):
-        if ".migration-v1-backup" in path.parts:
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        text = text.replace("## 진행 메모", "## 재개")
-        for old, new in mapping.items():
-            text = re.sub(rf"^kind:\s*{old}\s*$", f"kind: {new}", text, flags=re.M)
-        fm, _body = parse_frontmatter(text)
-        if fm.get("type") == "item" and "kind" not in fm:
-            inferred = None
-            for old, new in mapping.items():
-                if re.search(rf"(^|-){old}\d*($|-)", path.stem):
-                    inferred = new
-                    break
-            if inferred:
-                text = text.replace("type: item\n", f"type: item\nkind: {inferred}\n", 1)
-        text = re.sub(r"^[A-Za-z_]+:\s*null\s*\n", "", text, flags=re.M)
-        text = rewrite_v1_refs(text, id_map)
-        path.write_text(text, encoding="utf-8")
-    ensure_missing_v1_parents(project_dir)
-    warnings = absorb_v1_handoffs(ctx, project_dir)
-    normalize_v1_worklogs(ctx, project_dir)
-    for old in ["works.md", "classifications.md"]:
-        path = project_dir / old
-        if path.exists():
-            path.unlink()
-    return warnings
-
-
-def ensure_missing_v1_parents(project_dir: Path) -> None:
-    nodes = scan_docs(project_dir)
-    for node in list(nodes.values()):
-        parent = node.get("parent")
-        if not parent or parent == project_dir.name or parent in nodes:
-            continue
-        parent_id = str(parent)
-        try:
-            parent_path = id_to_path(project_dir, parent_id)
-        except PmtError:
-            continue
-        parts = parent_id.split("/")
-        if len(parts) < 3:
-            continue
-        class_name = parts[1]
-        title = parts[-1]
-        data = {
-            "type": "work",
-            "id": parent_id,
-            "parent": f"{project_dir.name}/{class_name}",
-            "status": "In Progress",
-            "updated": today(),
-        }
-        body = f"# {title}: migrated parent\n## Goal\n- migrated parent for v1 items\n## 결과\n-\n## 증거\n-\n"
-        write_doc(parent_path, data, body)
-
-
-def merge_v1_list(project_dir: Path, old_name: str, new_name: str, prefix: str) -> Dict[str, str]:
-    src = project_dir / old_name
-    if not src.exists():
-        return {}
-    dst = project_dir / new_name
-    fm, body = read_doc(dst)
-    source_fm, source_body = read_doc(src)
-    id_map: Dict[str, str] = {}
-    for row in extract_table_rows(source_body):
-        cells = split_table_row(row)
-        if not cells:
-            continue
-        old_id = cells[0]
-        if old_id.lower() == "id":
-            continue
-        status = canonical_status(cells[1] if len(cells) > 1 else source_fm.get("status"))
-        created = canonical_date(cells[2] if len(cells) > 2 else source_fm.get("updated"))
-        content = cells[-1] if len(cells) > 1 else row
-        new_id = allocate_list_id(fm, prefix)
-        id_map[old_id] = new_id
-        body = insert_table_row(body, f"| {new_id} | {status} | {created} | {escape_cell(f'[{old_id}] {content}')} |")
-    remainder = non_table_remainder(source_body)
-    if remainder:
-        new_id = allocate_list_id(fm, prefix)
-        body = insert_table_row(body, f"| {new_id} | Active | {today()} | {escape_cell(f'[{old_name}] {remainder}')} |")
-    if id_map or remainder:
-        fm["updated"] = today()
-        write_doc(dst, fm, body)
-    src.unlink()
-    return id_map
-
-
-def merge_v1_backlog(project_dir: Path, old_name: str, kind: str) -> Dict[str, str]:
-    src = project_dir / old_name
-    if not src.exists():
-        return {}
-    dst = project_dir / "backlog.md"
-    fm, body = read_doc(dst)
-    source_fm, source_body = read_doc(src)
-    id_map: Dict[str, str] = {}
-    for row in extract_table_rows(source_body):
-        cells = split_table_row(row)
-        if not cells:
-            continue
-        old_id = cells[0]
-        if old_id.lower() == "id":
-            continue
-        status = canonical_status(cells[1] if len(cells) > 1 else source_fm.get("status"))
-        created = canonical_date(cells[2] if len(cells) > 2 else source_fm.get("updated"))
-        content = cells[-1] if len(cells) > 1 else row
-        new_id = allocate_list_id(fm, "B")
-        id_map[old_id] = new_id
-        body = insert_table_row(body, f"| {new_id} | {kind} | {status} | {created} | {escape_cell(f'[{old_id}] {content}')} |")
-    remainder = non_table_remainder(source_body, skip_section="점검 특징" if old_name == "Bugs.md" else None)
-    if remainder:
-        new_id = allocate_list_id(fm, "B")
-        body = insert_table_row(body, f"| {new_id} | {kind} | Active | {today()} | {escape_cell(f'[{old_name}] {remainder}')} |")
-    if old_name == "Bugs.md":
-        bug_features = section_text(source_body, "점검 특징")
-        if bug_features:
-            current = section_text(body, "점검 특징")
-            merged = (current + "\n" + bug_features).strip()
-            body = replace_section(body, "점검 특징", merged)
-    if id_map or remainder or old_name == "Bugs.md":
-        fm["updated"] = today()
-        write_doc(dst, fm, body)
-    src.unlink()
-    return id_map
-
-
-def extract_table_rows(body: str) -> List[str]:
-    rows = []
-    for line in body.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            continue
-        cells = split_table_row(stripped)
-        if not cells or cells[0].lower() == "id" or set(stripped.replace("|", "").strip()) <= {"-"}:
-            continue
-        rows.append(stripped)
-    return rows
-
-
-def split_table_row(row: str) -> List[str]:
-    raw = row.strip().strip("|")
-    cells: List[str] = []
-    current = []
-    escaped = False
-    for char in raw:
-        if escaped:
-            current.append(char)
-            escaped = False
-        elif char == "\\":
-            current.append(char)
-            escaped = True
-        elif char == "|":
-            cells.append("".join(current).strip())
-            current = []
-        else:
-            current.append(char)
-    cells.append("".join(current).strip())
-    return cells
-
-
-def non_table_remainder(body: str, skip_section: Optional[str] = None) -> str:
-    if skip_section:
-        pattern = re.compile(rf"^## {re.escape(skip_section)}\n.*?(?=^## |\Z)", re.M | re.S)
-        body = pattern.sub("", body)
-    kept = []
-    in_table = False
-    for line in body.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("|"):
-            in_table = True
-            continue
-        if in_table and not stripped:
-            in_table = False
-            continue
-        if stripped.startswith("# ") and not kept:
-            continue
-        if stripped:
-            kept.append(stripped)
-    return " / ".join(kept)
-
-
-def allocate_list_id(frontmatter: Dict[str, Any], prefix: str) -> str:
-    number = int(frontmatter.get("next_id") or 1)
-    frontmatter["next_id"] = number + 1
-    return f"{prefix}{number}"
-
-
-def canonical_status(value: Any) -> str:
-    text = str(value or "Active").strip()
-    known = {"done": "Done", "canceled": "Canceled", "cancelled": "Canceled", "in progress": "In Progress", "planned": "Planned", "active": "Active"}
-    return known.get(text.lower(), text or "Active")
-
-
-def canonical_date(value: Any) -> str:
-    text = str(value or "").strip()
-    match = re.search(r"\d{4}-\d{2}-\d{2}", text)
-    return match.group(0) if match else today()
-
-
-def rewrite_v1_refs(text: str, id_map: Dict[str, str]) -> str:
-    if not id_map:
-        return text
-    fm, body = parse_frontmatter(text)
-    refs = as_list(fm.get("list_refs"))
-    if not refs:
-        return text
-    rewritten = []
-    for ref in refs:
-        new_id = id_map.get(ref.split("#")[-1])
-        if not new_id:
-            rewritten.append(ref)
-        elif new_id.startswith("F"):
-            rewritten.append(f"facts.md#{new_id}")
-        elif new_id.startswith("D"):
-            rewritten.append(f"decisions.md#{new_id}")
-        else:
-            rewritten.append(f"backlog.md#{new_id}")
-    fm["list_refs"] = rewritten
-    return render_frontmatter(fm, body)
-
-
-def absorb_v1_handoffs(ctx: Context, project_dir: Path) -> List[str]:
-    archive = project_dir / "resources" / "derived" / "handoff-archive"
-    warnings: List[str] = []
-    item_ids = sorted(
-        (item_id for item_id, node in scan_docs(project_dir).items() if node.get("type") == "item"),
-        key=len,
-        reverse=True,
-    )
-    candidates: List[Path] = []
-    candidates.extend(ctx.docs_root.glob("handoff-*.md"))
-    if ctx.worklog_root.exists():
-        candidates.extend(ctx.worklog_root.glob(f"{project_dir.name}__*-handoff.md"))
-    for path in candidates:
-        if not path.exists():
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        target = match_handoff_target(path, text, project_dir.name, item_ids)
-        if not target:
-            if project_dir.name in path.name or project_dir.name in text or path.parent == ctx.worklog_root:
-                warnings.append(f"unresolved handoff preserved: {path}")
-            continue
-        item_path = id_to_path(project_dir, target)
-        fm, body = read_doc(item_path)
-        resume = section_text(body, "재개")
-        imported = (
-            f"- 갱신: {timestamp()} (session migration-v1)\n"
-            f"- 한 것: v1 handoff imported from {path.name}\n"
-            f"- 다음: imported handoff 검토\n"
-            f"- 주의: 원문은 resources/derived/handoff-archive/{path.name}\n"
-            "- 대기: 없음\n"
-            "- 검증 못 한 것: handoff 자동 이관 내용 수동 검토\n\n"
-            "### v1 handoff 원문\n"
-            f"{text.strip()}"
-        )
-        body = replace_section(body, "재개", (resume + "\n\n" + imported).strip() if resume else imported)
-        fm["updated"] = today()
-        write_doc(item_path, fm, body)
-        ensure_dir(archive)
-        destination = unique_path(archive / path.name)
-        shutil.move(str(path), str(destination))
-    return warnings
-
-
-def match_handoff_target(path: Path, text: str, slug: str, item_ids: List[str]) -> Optional[str]:
-    matches = {item_id for item_id in item_ids if item_id in text}
-    if len(matches) == 1:
-        return next(iter(matches))
-    name_match = re.match(rf"{re.escape(slug)}__(.+)__([A-Za-z0-9_.-]+)-handoff\.md$", path.name)
-    if name_match:
-        candidate = f"{slug}/{name_match.group(1)}/{name_match.group(2)}"
-        if candidate in item_ids:
-            return candidate
-    return None
-
-
-def unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    stem = path.stem
-    suffix = path.suffix
-    for number in range(1, 1000):
-        candidate = path.with_name(f"{stem}-{number}{suffix}")
-        if not candidate.exists():
-            return candidate
-    raise PmtError(f"cannot allocate archive path for {path}", 1)
-
-
-def normalize_v1_worklogs(ctx: Context, project_dir: Path) -> None:
-    if not ctx.worklog_root.exists():
-        return
-    for path in list(ctx.worklog_root.glob(f"{project_dir.name}*.md")):
-        if path.parent.name == "done" or path.name.endswith("-handoff.md"):
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        fm, body = parse_frontmatter(text)
-        if not fm:
-            inferred_id = infer_worklog_issue(project_dir.name, path, body)
-            fm = {
-                "title": inferred_id or path.stem,
-                "status": "Active",
-                "issues": [inferred_id] if inferred_id else [],
-                "components": [inferred_id.split("/")[1]] if inferred_id and "/" in inferred_id else [],
-                "created": today(),
-            }
-            text = render_frontmatter(fm, body)
-        target_id = as_list(fm.get("issues"))[0] if as_list(fm.get("issues")) else infer_worklog_issue(project_dir.name, path, body)
-        target_path = path
-        if target_id and target_id.startswith(project_dir.name + "/"):
-            target_path = worklog_path_for_id(ctx, target_id)
-        if target_path != path:
-            ensure_dir(target_path.parent)
-            target_path = unique_path(target_path)
-            path.write_text(text, encoding="utf-8")
-            shutil.move(str(path), str(target_path))
-        else:
-            path.write_text(text, encoding="utf-8")
-
-
-def infer_worklog_issue(slug: str, path: Path, body: str) -> Optional[str]:
-    match = re.search(rf"{re.escape(slug)}/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", body)
-    if match:
-        return match.group(0)
-    name_match = re.match(rf"{re.escape(slug)}__(.+)__([A-Za-z0-9_.-]+)\.md$", path.name)
-    if name_match:
-        return f"{slug}/{name_match.group(1)}/{name_match.group(2)}"
-    return None
-
-
-def worklog_path_for_id(ctx: Context, item_id: str) -> Path:
-    parts = item_id.split("/")
-    class_name = parts[1] if len(parts) > 1 else "_default"
-    item_name = parts[-1]
-    return ctx.worklog_root / f"{parts[0]}__{class_name}__{item_name}.md"
-
-
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="pmt", description="Project Management Tool v2")
     parser.add_argument("--docs-root")
     parser.add_argument("--session")
     parser.add_argument("--project")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
 
     p = sub.add_parser("new")
     p.add_argument("slug")
@@ -1797,11 +1234,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--fix")
     p.add_argument("--reason")
 
-    p = sub.add_parser("sync")
-
-    p = sub.add_parser("graph")
-    p.add_argument("graph_kind", choices=["roots", "blocked", "children", "parents", "ancestors", "descendants", "orphans"])
-    p.add_argument("item_id", nargs="?")
+    p = sub.add_parser("sync", help=argparse.SUPPRESS)
 
     p = sub.add_parser("lock")
     p.add_argument("lock_kind", choices=["acquire", "beat", "release", "list", "reap"])
@@ -1811,19 +1244,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p = sub.add_parser("find")
     p.add_argument("query")
 
-    p = sub.add_parser("compact")
+    p = sub.add_parser("compact", help=argparse.SUPPRESS)
     p = sub.add_parser("doctor")
     p.add_argument("--scope")
-
-    p = sub.add_parser("close")
-    p.add_argument("slug", nargs="?")
-    p.add_argument("--confirm", action="store_true")
-    p.add_argument("--remote-synced", action="store_true")
-
-    p = sub.add_parser("migrate")
-    p.add_argument("migrate_kind", choices=["v1"])
-    p.add_argument("slug", nargs="?")
-    p.add_argument("--apply", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -1839,13 +1262,10 @@ def main(argv: Sequence[str] = sys.argv[1:]) -> int:
             "note": cmd_note,
             "end": cmd_end,
             "sync": cmd_sync,
-            "graph": cmd_graph,
             "lock": cmd_lock,
             "find": cmd_find,
             "compact": cmd_compact,
             "doctor": cmd_doctor,
-            "close": cmd_close,
-            "migrate": cmd_migrate,
         }
         return handlers[args.command](ctx, args)
     except PmtError as exc:

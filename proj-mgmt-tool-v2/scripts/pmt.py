@@ -925,6 +925,19 @@ def write_resume_block(path: Path, session: str, did: str, next_step: str, watch
 
 
 def cmd_note(ctx: Context, args: argparse.Namespace) -> int:
+    fields = (
+        ("did", args.did),
+        ("next", args.next_step),
+        ("watch", args.watch),
+        ("wait", args.wait),
+        ("unverified", args.unverified),
+    )
+    for option, value in fields:
+        if value is not None and len(value) > 400:
+            raise PmtError(
+                f"--{option} 400자 초과: 요약하고 상세는 Item 본문 또는 resources/evidence에",
+                2,
+            )
     project_dir = ctx.project_dir()
     path = id_to_path(project_dir, args.item_id)
     require_lock_owner(project_lock_base(project_dir), args.item_id, ctx)
@@ -964,6 +977,8 @@ def cmd_verify(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
+    if args.item_id and "/" not in args.item_id:
+        ctx.project = args.item_id
     project_dir = ctx.project_dir()
     if args.all:
         if not args.pause:
@@ -987,6 +1002,22 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
         raise PmtError("choose exactly one end mode", 2)
     path = id_to_path(project_dir, args.item_id)
     fm, body = read_doc(path)
+    if fm.get("type") == "project":
+        if not args.done or not args.confirm:
+            raise PmtError("프로젝트 종료는 --confirm 필요", 2)
+        unfinished = sorted(
+            item_id
+            for item_id, node in scan_docs(project_dir).items()
+            if node.get("type") == "work" and node.get("status") not in {"Done", "Canceled"}
+        )
+        if unfinished:
+            print(f"경고: 미완료 Work: {', '.join(unfinished)}", file=sys.stderr)
+        fm["status"] = "Done"
+        fm["updated"] = today()
+        write_doc(path, fm, body)
+        sync(ctx, project_dir)
+        print(f"프로젝트 종료: {args.item_id}")
+        return 0
     if args.done:
         if not args.result:
             raise PmtError("--done requires --result", 2)
@@ -1183,57 +1214,161 @@ def sync(ctx: Context, project_dir: Path) -> None:
     finally:
         release_lock(project_lock_base(project_dir), index_id, ctx.session)
 
+def clip_lines(lines: List[str], limit: int, more: str) -> List[str]:
+    return lines if len(lines) <= limit else lines[:limit] + [more]
+
+
+def clip_text(text: str, limit: int, tail: str) -> str:
+    if len(text) <= limit:
+        return text
+    if len(tail) >= limit:
+        return tail[: limit - 1] + "…"
+    room = max(0, limit - len(tail) - 1)
+    clipped = text[:room]
+    if "\n" in text and "\n" in clipped:
+        clipped = clipped.rsplit("\n", 1)[0]
+    separator = "\n" if "\n" in text and clipped.strip() else ""
+    return clipped.rstrip() + separator + tail
+
+
 def render_resume(ctx: Context, project_dir: Path, graph: Dict[str, Any]) -> str:
     nodes = graph["nodes"]
-    active_work = sum(1 for n in nodes.values() if n.get("type") == "work" and n.get("status") == "In Progress")
-    active_item = sum(1 for n in nodes.values() if n.get("type") == "item" and n.get("status") == "In Progress")
-    locks = [row for row in read_locks(project_lock_base(project_dir)) if not str(row.get("id", "")).startswith("__")]
-    project_goal = ""
-    project = nodes.get(project_dir.name)
-    if project:
-        goal = section_text(project["body"], "Goal")
-        project_goal = next((line.strip("- ").strip() for line in goal.splitlines() if line.strip("- ")), "")
-    lines = [
-        f"# RESUME - {project_dir.name} 생성 {timestamp()}",
-        "## 30초 요약",
-        f"- Goal: {project_goal}",
-        f"- 활성 Work {active_work} · In Progress Item {active_item} · 점유 중 {len(locks)} · 미정 필드 0",
-        "",
-        "## 지금 점유 중 (Doing)",
-        "| 세션 | 대상 | 경과 | 메모 |",
-        "|---|---|---|---|",
+    locks = sorted(
+        [
+            row
+            for row in read_locks(project_lock_base(project_dir))
+            if not str(row.get("id", "")).startswith("__")
+        ],
+        key=lambda row: str(row.get("heartbeat") or ""),
+        reverse=True,
+    )
+    lock_by_id = {str(row.get("id")): row for row in locks}
+    in_progress = [
+        (item_id, node)
+        for item_id, node in nodes.items()
+        if node.get("type") == "item" and node.get("status") == "In Progress"
     ]
-    for row in locks:
-        lines.append(f"| {row.get('session')} | {row.get('id')} | {row.get('heartbeat')} | {'stale' if row.get('stale') else ''} |")
-    lines.append("\n## 이어받을 항목 (In Progress, 재개 블록 최신순)")
-    for item_id, node in sorted(nodes.items(), key=lambda kv: str(kv[1].get("updated") or ""), reverse=True):
-        if node.get("status") == "In Progress":
-            lines.append(f"### {item_id} - {node.get('title')}")
-            lines.append(node.get("resume") or "- 재개 정보 없음")
-    lines.append("\n## 착수 가능 (선행 없음, 최대 10)")
-    roots = 0
-    for item_id, node in sorted(nodes.items()):
-        if roots >= 10:
-            break
-        if node.get("type") != "project" and node.get("status") == "Planned" and not node.get("blocked_by"):
-            lines.append(f"- {item_id} ({node.get('kind') or node.get('type')} {node.get('status')}) - {node.get('title')}")
-            roots += 1
-    if roots == 0:
-        lines.append("- 없음")
-    lines.append("\n## 최근 결정 5 / 최근 사실 5")
-    lines.extend(recent_list_rows(project_dir / "decisions.md", 5, status="승인"))
-    lines.extend(recent_list_rows(project_dir / "facts.md", 5))
-    lines.append("\n## 최근 worklog 결과 3")
-    lines.extend(recent_worklog(ctx, project_dir.name, 3))
-    lines.append("\n## 주의 (doctor warn/fail 요약)")
+    in_progress.sort(
+        key=lambda pair: (
+            pair[0] in lock_by_id,
+            str(lock_by_id.get(pair[0], {}).get("heartbeat") or pair[1].get("updated") or ""),
+        ),
+        reverse=True,
+    )
+    external = sorted(
+        (item_id, value[4:])
+        for item_id, node in nodes.items()
+        for value in node.get("blocked_by") or []
+        if value.startswith("ext:")
+    )
+    startable = [
+        (item_id, node)
+        for item_id, node in sorted(nodes.items())
+        if node.get("type") in {"work", "item"}
+        and node.get("status") == "Planned"
+        and not node.get("blocked_by")
+    ]
+    project = nodes.get(project_dir.name)
+    goal = section_text(project["body"], "Goal") if project else ""
+    project_goal = next(
+        (line.strip("- ").strip() for line in goal.splitlines() if line.strip("- ")),
+        "",
+    )
+    active_work = sum(
+        1
+        for node in nodes.values()
+        if node.get("type") == "work" and node.get("status") == "In Progress"
+    )
+    decisions = recent_list_rows(project_dir / "decisions.md", 3, status="승인")
+    facts = recent_list_rows(project_dir / "facts.md", 3, status="Active")
+    results = recent_worklog(ctx, project_dir.name, 2)
     warnings, failures = doctor_collect(project_dir, nodes)
-    for item in (failures + warnings)[:10]:
-        lines.append(f"- {item}")
-    if not warnings and not failures:
-        lines.append("- 없음")
-    text = "\n".join(lines) + "\n"
-    if len(text) > 6000:
-        text = text[:5900] + "\n\n- RESUME length trimmed; inspect graph.md and active item files for detail.\n"
+    stages = [
+        ("없음", 400, 3, 5),
+        ("1단계(재개 200자)", 200, 3, 5),
+        ("2단계(결정·사실 2건)", 200, 2, 5),
+        ("3단계(착수 3건)", 200, 2, 3),
+    ]
+    for stage, resume_limit, recent_limit, start_limit in stages:
+        lines = [
+            clip_text(f"# RESUME - {project_dir.name} 생성 {timestamp()}", 200, "…"),
+            "## 요약",
+            f"- Goal: {clip_text(project_goal, 200, '…')}",
+            (
+                f"- 활성 Work {active_work} · In Progress Item {len(in_progress)}"
+                f" · 점유 {len(locks)} · 외부 대기 {len(external)}"
+            ),
+            "",
+            "## 점유 중",
+            "| 세션 | 대상 | heartbeat | 상태 |",
+            "|---|---|---|---|",
+        ]
+        lock_rows = [
+            clip_text(
+                (
+                    f"| {row.get('session')} | {row.get('id')} | {row.get('heartbeat')}"
+                    f" | {'stale' if row.get('stale') else 'active'} |"
+                ),
+                120,
+                "…",
+            )
+            for row in locks
+        ]
+        lines.extend(
+            clip_lines(lock_rows, 3, f"…{max(0, len(lock_rows) - 3)}건 더: pmt lock list")
+            or ["- 없음"]
+        )
+        lines.extend(["", "## 이어받을 항목 (heartbeat 최신순)"])
+        for item_id, node in in_progress[:3]:
+            lines.append(clip_text(f"### {item_id} - {node.get('title')}", 120, "…"))
+            lines.append(
+                clip_text(
+                    node.get("resume") or "- 재개 정보 없음",
+                    resume_limit,
+                    f"…(전문: pmt find {item_id})",
+                )
+            )
+        if not in_progress:
+            lines.append("- 없음")
+        elif len(in_progress) > 3:
+            remaining = ", ".join(item_id for item_id, _ in in_progress[3:])
+            lines.append(clip_text(f"- 그 외 In Progress: {remaining}", 180, "…"))
+        lines.extend(["", "## 외부 대기"])
+        wait_rows = [clip_text(f"- {item_id}: {value}", 120, "…") for item_id, value in external]
+        lines.extend(clip_lines(wait_rows, 3, f"…{max(0, len(wait_rows) - 3)}건 더") or ["- 없음"])
+        lines.extend(["", "## 착수 가능 (Planned, 차단 없음)"])
+        start_rows = [
+            clip_text(
+                f"- {item_id} ({node.get('kind') or node.get('type')}) - {node.get('title')}",
+                120,
+                "…",
+            )
+            for item_id, node in startable
+        ]
+        lines.extend(
+            clip_lines(
+                start_rows,
+                start_limit,
+                f"…{max(0, len(start_rows) - start_limit)}건 더",
+            )
+            or ["- 없음"]
+        )
+        lines.extend(["", f"## 승인 결정 최근 {recent_limit}"])
+        lines.extend(decisions[-recent_limit:] or ["- 없음"])
+        lines.extend(["", f"## 사실 최근 {recent_limit}"])
+        lines.extend(facts[-recent_limit:] or ["- 없음"])
+        lines.extend(["", "## 최근 결과 2"])
+        lines.extend(results or ["- 없음"])
+        lines.extend(["", "## 주의"])
+        notices = [clip_text(f"- {value}", 120, "…") for value in failures + warnings]
+        lines.extend(
+            clip_lines(notices, 3, f"…{max(0, len(notices) - 3)}건 더: pmt doctor")
+            or ["- 없음"]
+        )
+        lines.append(f"축소 적용: {stage}")
+        text = "\n".join(lines) + "\n"
+        if len(text) <= 4500:
+            return text
     return text
 
 
@@ -1241,24 +1376,37 @@ def recent_list_rows(path: Path, limit: int, status: Optional[str] = None) -> Li
     if not path.exists():
         return []
     _, body = read_doc(path)
-    rows = [line for line in body.splitlines() if line.startswith("| ") and not line.startswith("| ID ") and not line.startswith("|---")]
-    if status:
-        status_index = table_header(body).index("상태")
-        rows = [line for line in rows if split_table_row(line)[status_index] == status]
-    return [f"- {row.strip('| ')}" for row in rows[-limit:]]
+    header = table_header(body)
+    rows = []
+    for line in body.splitlines():
+        cells = split_table_row(line) if line.startswith("| ") else []
+        if not cells or not re.fullmatch(r"[FDB]\d+", cells[0]):
+            continue
+        if status and cells[header.index("상태")] != status:
+            continue
+        if "제목" in header:
+            value = f"- {cells[0]} {cells[header.index('제목')]}: {cells[header.index('내용')]}"
+        else:
+            value = f"- {cells[0]} {cells[header.index('내용')]}"
+        rows.append(clip_text(value, 150, "…"))
+    return rows[-limit:]
 
 
 def recent_worklog(ctx: Context, slug: str, limit: int) -> List[str]:
-    roots = [ctx.worklog_root, ctx.worklog_root / "done"]
     hits: List[Tuple[float, str]] = []
-    for root in roots:
+    for root in (ctx.worklog_root, ctx.worklog_root / "done"):
         if not root.exists():
             continue
         for path in root.glob(f"{slug}__*.md"):
             text = path.read_text(encoding="utf-8", errors="ignore")
-            if "## 결과" in text:
-                hits.append((path.stat().st_mtime, f"- {path.name}: 결과 기록 있음"))
-    return [x for _, x in sorted(hits, reverse=True)[:limit]] or ["- 없음"]
+            match = re.search(r"^## 결과(?: .*?)?\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+            if not match:
+                continue
+            first = next((line.strip() for line in match.group(1).splitlines() if line.strip()), "")
+            if first:
+                result = clip_text(first, 120, "…")
+                hits.append((path.stat().st_mtime, clip_text(f"- {path.name}: {result}", 180, "…")))
+    return [value for _, value in sorted(hits, reverse=True)[:limit]]
 
 
 def cmd_resume(ctx: Context, args: argparse.Namespace) -> int:
@@ -1706,6 +1854,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--cause")
     p.add_argument("--fix")
     p.add_argument("--reason")
+    p.add_argument("--confirm", action="store_true")
 
     p = sub.add_parser("sync", help=argparse.SUPPRESS)
 

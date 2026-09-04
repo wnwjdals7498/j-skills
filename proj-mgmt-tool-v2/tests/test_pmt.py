@@ -920,6 +920,101 @@ class PmtTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("| exit 3 | 3 |", item_path.read_text(encoding="utf-8"))
 
+    def test_resume_under_budget_with_many_in_progress_and_decisions(self):
+        slug = "resume-budget"
+        self.run_pmt("new", slug, "--goal", "keep resume bounded")
+        work = self.run_pmt("--project", slug, "add", "work", "Large work").stdout.strip()
+        stamp = dt.datetime.now().replace(microsecond=0).isoformat(timespec="minutes")
+        for index in range(20):
+            item = self.run_pmt(
+                "--project", slug, "add", "item", work, f"Item {index + 1}"
+            ).stdout.strip()
+            path = self.docs / "projects" / slug / "_default" / f"{item.split('/')[-1]}.md"
+            text = path.read_text(encoding="utf-8").replace("status: Planned", "status: In Progress")
+            resume = f"- 갱신: {stamp}\n" + "\n".join(f"- 기록 {n}: {'x' * 80}" for n in range(22))
+            text = text.replace("## 재개\n<start 이후 note가 채움>\n", f"## 재개\n{resume}\n")
+            path.write_text(text, encoding="utf-8")
+        for index in range(30):
+            self.run_pmt(
+                "--project",
+                slug,
+                "decide",
+                f"Decision {index + 1}",
+                "--context",
+                "context",
+                "--decision",
+                f"choice {index + 1}",
+            )
+        worklog = self.docs / "worklog" / f"{slug}___default__result.md"
+        worklog.parent.mkdir(parents=True)
+        worklog.write_text("# log\n## 결과 2026-09-04T10:00\n- 실제 결과 한 줄\n", encoding="utf-8")
+
+        resume = self.run_pmt("resume", slug).stdout
+
+        self.assertLessEqual(len(resume), 4500)
+        self.assertIn("## 착수 가능", resume)
+        self.assertIn("## 주의", resume)
+        self.assertIn("축소 적용:", resume)
+        self.assertIn("실제 결과 한 줄", resume)
+        self.assertNotIn("RESUME length trimmed", resume)
+
+    def test_resume_shows_external_waits_and_hides_blocked_from_startable(self):
+        slug, work, blocked = self.make_item(slug="external-wait")
+        ready = self.run_pmt("--project", slug, "add", "item", work, "Ready").stdout.strip()
+        self.run_pmt("--project", slug, "set", blocked, "--blocked-by", "ext:외부승인")
+
+        resume = self.run_pmt("resume", slug).stdout
+        waits = resume.split("## 외부 대기", 1)[1].split("## 착수 가능", 1)[0]
+        startable = resume.split("## 착수 가능", 1)[1].split("## 승인 결정", 1)[0]
+
+        self.assertIn(f"{blocked}: 외부승인", waits)
+        self.assertNotIn(blocked, startable)
+        self.assertIn(ready, startable)
+        self.assertIn("외부 대기 1", resume)
+
+    def test_note_rejects_field_over_400_chars(self):
+        slug, _work, item = self.make_item(slug="note-limit")
+        self.run_pmt("--project", slug, "start", item)
+        cases = {
+            "did": ("--did", "x" * 401, "--next", "next"),
+            "next": ("--did", "did", "--next", "x" * 401),
+            "watch": ("--did", "did", "--next", "next", "--watch", "x" * 401),
+            "wait": ("--did", "did", "--next", "next", "--wait", "x" * 401),
+            "unverified": (
+                "--did",
+                "did",
+                "--next",
+                "next",
+                "--unverified",
+                "x" * 401,
+            ),
+        }
+        for option, args in cases.items():
+            with self.subTest(option=option):
+                result = self.run_pmt("--project", slug, "note", item, *args, ok=False)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f"--{option} 400자 초과", result.stderr)
+        accepted = self.run_pmt(
+            "--project", slug, "note", item, "--did", "x" * 400, "--next", "next"
+        )
+        self.assertEqual(accepted.returncode, 0)
+
+    def test_project_close_requires_confirm_and_marks_done(self):
+        slug, work, _item = self.make_item(slug="project-close")
+
+        rejected = self.run_pmt("end", slug, "--done", ok=False)
+        closed = self.run_pmt("end", slug, "--done", "--confirm")
+        project = self.docs / "projects" / slug / "project.md"
+        projects = self.docs / "projects" / "projects.md"
+
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("프로젝트 종료는 --confirm 필요", rejected.stderr)
+        self.assertEqual(closed.returncode, 0)
+        self.assertIn(f"경고: 미완료 Work: {work}", closed.stderr)
+        self.assertIn("status: Done", project.read_text(encoding="utf-8"))
+        self.assertIn(f"| {slug} | Done |", projects.read_text(encoding="utf-8"))
+        self.assertIn(f"프로젝트 종료: {slug}", closed.stdout)
+
     def test_parallel_sync_writes_resume_and_doctor_passes(self):
         slug, _work, _item = self.make_item()
         barrier = threading.Barrier(4)

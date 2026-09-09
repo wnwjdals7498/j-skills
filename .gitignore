@@ -1,3 +1,6 @@
 .omc/
+.omx/
+.claude/
+.agents/
 __pycache__/
 *.pyc

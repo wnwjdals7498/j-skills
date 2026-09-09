@@ -158,7 +158,9 @@ def replace_section(body: str, heading: str, replacement: str) -> str:
     pattern = re.compile(rf"(^## {re.escape(heading)}\n)(.*?)(?=^## |\Z)", re.M | re.S)
     repl = f"## {heading}\n{replacement.rstrip()}\n"
     if pattern.search(body):
-        return pattern.sub(repl, body, count=1)
+        # 본문을 치환 템플릿으로 넘기면 안 된다. 내용에 \d 나 \1 이 있으면
+        # re 가 escape 로 해석해 bad escape 로 죽는다(정규식·경로가 든 결과문에서 실제로 났다).
+        return pattern.sub(lambda _m: repl, body, count=1)
     if not body.endswith("\n"):
         body += "\n"
     return body + "\n" + repl

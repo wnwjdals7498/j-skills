@@ -1,0 +1,101 @@
+# VISUAL_SPEC (3D) — 시각 계약
+# authoritative. 형용사가 아니라 숫자와 HEX 로 채운다.
+# 채우는 법: {KIT_ROOT}/references/pipeline/V1_CONCEPT_DECOMPOSITION.md
+# 스키마 설명: {KIT_ROOT}/references/profiles/PROFILE_3D.md
+
+profile: 3d
+approved: false
+approved_by: null
+approved_at: null
+
+target_resolution: [1920, 1080]
+render_pipeline: URP              # URP | HDRP | BuiltIn
+
+camera:
+  projection: perspective         # perspective | orthographic
+  fov: null
+  orthographic_size: null
+  height_range: [null, null]
+  pitch: null
+  near: 0.3
+  far: 300
+
+world_scale:
+  human_height: 1.75
+  door_height: 2.2
+  door_width: 1.1
+  floor_height: 3.0
+  window_height: 0.9
+
+geometry:
+  style: low_poly                 # low_poly | mid_poly | realistic
+  bevel: required
+  hard_90_degree_edges: avoid
+  tiny_geometry: forbidden
+  min_feature_size_m: 0.05
+
+# V1 의 measured.dominant_colors 에서 채운다. 예시는 주석 처리.
+palette: {}
+  # grass: "#718C4C"
+  # soil: "#6D513B"
+  # wood_dark: "#5C3A29"
+  # stone: "#80817B"
+  # accent: "#D7B874"
+
+materials:
+  master_shader: MAT_Master_Stylized
+  families: [Nature, Architecture, Character, Metal, Cloth, FX]
+  metallic: 0
+  smoothness_max: 0.25
+  normal_strength_max: 0.3
+
+lighting:
+  main_light:
+    rotation: [null, null, 0]
+    color_temperature: null
+    intensity: null
+  ambient_intensity: null
+  shadow_strength: null
+  fog:
+    enabled: false
+    color: null
+    density: null
+
+postprocessing:
+  profile: VP_Global
+  tonemapping: Neutral            # Neutral | ACES | None
+  saturation: 0
+  contrast: 0
+  bloom_intensity: 0
+  vignette: 0
+  lut: null
+
+architecture:
+  wall_height: 2.8
+  wall_thickness: 0.2
+  roof_pitch_range: [35, 50]
+  footprint_grid_m: 0.5
+
+ui:
+  spacing: {xs: 4, sm: 8, md: 16, lg: 24, xl: 32}
+  radius: {button: 8, panel: 12}
+  font: {body: 18, caption: 14, h1: 36}
+  button: {min_height: 48, horizontal_padding: 20}
+
+forbidden:
+  - pure_white_material
+  - pure_black_material
+  - realistic_pbr
+  - neon_color
+  - default_unity_material
+  - cinematic_dof
+  - photorealistic_microtexture
+  - non_uniform_scale
+
+linter:
+  exempt_roots: [Blockout, EditorOnly]
+  exempt_prefixes: [BLOCKOUT_, MISSING_, DEBUG_]
+  color_delta_e_tolerance: 6
+
+notes: |
+  형용사와 배경 설명은 여기에만. 위 필드는 전부 숫자 또는 HEX.

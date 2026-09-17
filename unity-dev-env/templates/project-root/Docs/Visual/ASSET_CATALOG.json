@@ -1,0 +1,66 @@
+{
+  "$comment": "승인 에셋 카탈로그. 여기 없는 에셋은 씬에 넣을 수 없다. 채우는 법: {KIT_ROOT}/references/pipeline/V5_ASSET_STRATEGY.md",
+  "version": 1,
+  "updated_at": null,
+
+  "assets": {
+    "_example_tree_oak_01": {
+      "path": "Assets/Art/Approved/Nature/tree_oak_01.fbx",
+      "type": "tree",
+      "style": "stylized_lowpoly",
+      "worldHeight": 4.3,
+      "allowedScale": [0.85, 1.2],
+      "materialFamily": "MAT_Nature",
+      "source": "Quaternius StylizedNature MegaKit (CC0)",
+      "approved_at": null
+    },
+
+    "_example_house_small_01": {
+      "path": "Assets/Art/Approved/Buildings/house_small_01.prefab",
+      "type": "building",
+      "footprint": [6, 4],
+      "allowedScale": [0.95, 1.05],
+      "materialFamily": "MAT_Architecture",
+      "source": "ProBuilder (in-project)",
+      "approved_at": null
+    },
+
+    "_example_sprite_npc_merchant": {
+      "path": "Assets/Art/Approved/Characters/npc_merchant.png",
+      "type": "npc",
+      "sourceCanvas": [256, 256],
+      "pixelsPerUnit": 128,
+      "pivot": "bottom_center",
+      "worldHeight": [1.55, 1.75],
+      "atlas": "SA_Characters",
+      "source": "Kenney (CC0)",
+      "approved_at": null
+    }
+  },
+
+  "missing": [
+    {
+      "$comment": "해결되지 않은 시각 요소. MISSING_ 오브젝트 + MAT_Missing 으로 씬에 표시된다.",
+      "_example": {
+        "key": "fountain_center",
+        "type": "prop",
+        "needed_for": "VisualRebuild.unity 광장 중앙",
+        "why_blocked": "카탈로그에 분수 없음, ProBuilder 로 만들기엔 형태 복잡",
+        "options": ["CC0 팩 추가", "ProBuilder 단순화", "범위 제외"],
+        "reported_at": null
+      }
+    }
+  ],
+
+  "sources": {
+    "$comment": "도입한 외부 팩. 단일 계열 원칙. 라이선스는 도입 시점에 원문 재확인.",
+    "_example": {
+      "name": "Quaternius StylizedNature MegaKit",
+      "url": null,
+      "license": "CC0",
+      "commercial_use": true,
+      "approved_by": null,
+      "approved_at": null
+    }
+  }
+}

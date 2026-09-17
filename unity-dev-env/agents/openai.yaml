@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unity AI 개발 파이프라인"
+  short_description: "Unity 비주얼·코드 작업을 게이트와 증거 기반 스테이지로 진행시킨다"
+  default_prompt: "$unity-dev-env 스킬로 이 Unity 프로젝트의 현재 스테이지를 파악하고 파이프라인을 이어서 진행해 줘."

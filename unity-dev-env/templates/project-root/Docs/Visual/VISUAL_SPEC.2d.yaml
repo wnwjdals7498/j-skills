@@ -1,0 +1,115 @@
+# VISUAL_SPEC (2D) — 시각 계약
+# authoritative. 형용사가 아니라 숫자와 HEX 로 채운다.
+# 채우는 법: {KIT_ROOT}/references/pipeline/V1_CONCEPT_DECOMPOSITION.md
+# 스키마 설명: {KIT_ROOT}/references/profiles/PROFILE_2D.md
+
+profile: 2d
+approved: false
+approved_by: null
+approved_at: null
+
+target_resolution: [1920, 1080]
+reference_resolution: [640, 360]  # 에셋 제작 전에 결정. 이후 변경 금지
+render_pipeline: URP
+
+art_style: pixel                  # pixel | handpainted | vector | prerendered_3d
+
+camera:
+  projection: orthographic
+  orthographic_size: null         # reference_resolution.y / (2 * pixels_per_unit)
+  pixel_perfect: true
+  pixels_per_unit: 32
+  upscale_render_texture: true
+  crop_frame: none
+
+# 카테고리별 크기 계약. 크기 문제의 해법.
+# 크기는 PPU 와 pivot 으로 맞춘다. Transform.scale 로 우겨넣지 않는다.
+sprites:
+  player:
+    source_canvas: [256, 256]
+    occupied_height_px: [null, null]
+    pixels_per_unit: 128
+    pivot: [0.5, 0.08]
+    world_height: [null, null]
+  npc:
+    source_canvas: [256, 256]
+    pixels_per_unit: 128
+    pivot: bottom_center
+  tree:
+    source_canvas: [512, 512]
+    pixels_per_unit: 128
+    world_height: [null, null]
+    pivot: bottom_center
+  item_icon:
+    source_canvas: [128, 128]
+    occupied_area_percent: [65, 82]
+    padding_px: 12
+    pivot: center
+  tile:
+    source_canvas: [32, 32]
+    pixels_per_unit: 32
+    pivot: center
+
+import:
+  filter_mode: Point              # pixel art 인 경우
+  compression: None
+  generate_mipmaps: false
+  max_texture_size: 2048
+  sprite_atlas: true
+
+palette:
+  primary_count: 16
+  colors: []
+  shadow_hue: null
+  highlight_hue: null
+  max_saturation: null
+
+lines:
+  outer_contour_px: 3
+  inner_detail_px: [1, 2]
+  never_pure_black: true
+
+shape_language:
+  characters: null
+  buildings: null
+  props: null
+  min_detail_px: 6
+
+detail_density: [character, interactable, environment, background]
+
+lighting:
+  main_light_direction: upper_left
+  shadow_softness: fixed
+  baked_rim_in_texture: forbidden
+
+postprocessing:
+  profile: VP_Global
+  tonemapping: Neutral
+  saturation: 0
+  contrast: 0
+  bloom_intensity: 0
+
+ui:
+  spacing: {xs: 4, sm: 8, md: 16, lg: 24, xl: 32}
+  radius: {button: 8, panel: 12}
+  font: {body: 18, caption: 14, h1: 36}
+  button: {min_height: 48, horizontal_padding: 20}
+  nine_slice_border_px: 8
+
+forbidden:
+  - realistic_skin
+  - cinematic_dof
+  - glossy_plastic
+  - random_rim_lights
+  - photorealistic_textures
+  - default_unity_material
+  - non_uniform_sprite_scale
+  - transform_scale_for_sizing
+
+linter:
+  exempt_roots: [Blockout, EditorOnly]
+  exempt_prefixes: [BLOCKOUT_, MISSING_, DEBUG_]
+  color_delta_e_tolerance: 6
+
+notes: |
+  형용사와 배경 설명은 여기에만. 위 필드는 전부 숫자 또는 HEX.

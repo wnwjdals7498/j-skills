@@ -1,0 +1,100 @@
+# CONCEPT_ANALYSIS — V1 산출물
+# semantic: 에이전트가 이미지를 보고 판단한 것
+# measured: 스크립트로 실제 측정한 것 (Tools/concept_analyze.py)
+# 이 둘을 섞지 않는다. 에이전트의 눈을 정확한 계측기로 취급하지 않는다.
+
+source: Docs/Visual/Reference/Concept_Master.png
+analyzed_at: null
+
+# ────────────────────────────────────────────────────────────
+# 정성 분석 (에이전트가 잘하는 것)
+# 각 항목 definition: REFERENCE_DEFINED | REFERENCE_INFERRED | UNDEFINED
+# ────────────────────────────────────────────────────────────
+semantic:
+  camera:
+    projection: {value: null, definition: null}
+    estimated_fov: {value: null, definition: null}
+    camera_height: {value: null, definition: null}
+    pitch: {value: null, definition: null}
+    subject_distance: {value: null, definition: null}
+    horizon_position: {value: null, definition: null}
+
+  composition:
+    focal_point: {value: null, definition: null}
+    fg_mg_bg_ratio: {value: null, definition: null}
+    negative_space: {value: null, definition: null}
+    visual_density: {value: null, definition: null}
+    dominant_shapes: {value: null, definition: null}
+
+  scale:
+    player_to_door: {value: null, definition: null}
+    player_to_building: {value: null, definition: null}
+    tree_to_building: {value: null, definition: null}
+    road_width_to_character: {value: null, definition: null}
+    ui_to_viewport: {value: null, definition: null}
+
+  shape_language:
+    dominant_forms: {value: null, definition: null}
+    silhouette: {value: null, definition: null}
+    bevel_roundness: {value: null, definition: null}
+    edge_treatment: {value: null, definition: null}
+    exaggeration: {value: null, definition: null}
+
+  color:
+    dominant_palette: {value: null, definition: null}
+    accent_palette: {value: null, definition: null}
+    shadow_color: {value: null, definition: null}
+    background_saturation: {value: null, definition: null}
+    focal_saturation: {value: null, definition: null}
+
+  lighting:
+    direction: {value: null, definition: null}
+    softness: {value: null, definition: null}
+    ambient_level: {value: null, definition: null}
+    shadow_density: {value: null, definition: null}
+    warm_cool_relation: {value: null, definition: null}
+
+  material:
+    rough_matte_glossy: {value: null, definition: null}
+    texture_density: {value: null, definition: null}
+    stylization_level: {value: null, definition: null}
+
+  environment:
+    terrain_structure: {value: null, definition: null}
+    building_density: {value: null, definition: null}
+    prop_density: {value: null, definition: null}
+    foliage_distribution: {value: null, definition: null}
+
+  ui:
+    typography_scale: {value: null, definition: null}
+    margins: {value: null, definition: null}
+    opacity: {value: null, definition: null}
+    shape_language: {value: null, definition: null}
+
+# ────────────────────────────────────────────────────────────
+# 정량 측정 (스크립트로 잰 것). 추정 금지.
+# 이 색상들이 그대로 Unity Material / Volume / UI 토큰이 된다.
+# ────────────────────────────────────────────────────────────
+measured:
+  resolution: [null, null]
+  aspect_ratio: null
+  dominant_colors: []             # k-means k=8~16, HEX 목록
+  mean_brightness: null
+  saturation_histogram: []
+  shadow_region_mean_color: null
+  highlight_region_mean_color: null
+  horizon_y: null
+  object_bounding_boxes: []       # {name, x, y, w, h, screen_percent}
+  ui_margins_px: {}
+
+# ────────────────────────────────────────────────────────────
+# UNDEFINED — 컨셉에 없는 영역. 임의 구현 금지.
+# V1 EXIT 전에 사용자 결정을 받아야 한다.
+# ────────────────────────────────────────────────────────────
+undefined_items: []
+  # - key: night_lighting
+  #   reason: "컨셉에 야간 장면 없음"
+  #   resolution: null
+  # - key: interior_scene
+  #   reason: "실내 컨셉 없음"
+  #   resolution: null

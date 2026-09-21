@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>plan-format</title>
+<style>
+body { font-family: -apple-system, "Apple SD Gothic Neo", "맑은 고딕", sans-serif; color: #24292f; background: #ffffff; line-height: 1.6; max-width: 920px; margin: 0 auto; padding: 40px 32px; }
+h1 { font-size: 2.1em; color: #1f2328; padding-bottom: 12px; border-bottom: 1px solid #d0d7de; margin-top: 0; }
+h2 { font-size: 1.5em; color: #1f2328; padding: 8px 0 8px 14px; border-left: 4px solid #fd8c73; margin-top: 2em; background: linear-gradient(to right, #fff8f0, transparent 60%); }
+h3 { font-size: 1.2em; color: #57606a; margin-top: 1.4em; padding-left: 8px; border-left: 2px solid #d0d7de; }
+p { margin: 0.7em 0; }
+a { color: #0969da; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 0.88em; color: #cf222e; border: 1px solid #d0d7de; }
+pre { background: #0d1117; color: #c9d1d9; padding: 14px 18px; border-radius: 6px; overflow-x: auto; line-height: 1.5; font-size: 0.9em; position: relative; }
+pre::before { content: "CODE"; position: absolute; top: 8px; right: 12px; font-size: 10px; color: #8b949e; letter-spacing: 0.1em; font-family: monospace; }
+pre code { background: transparent; color: inherit; padding: 0; border: 0; }
+blockquote { background: #ddf4ff; border-left: 4px solid #54aeff; padding: 12px 16px; margin: 1em 0; color: #0550ae; border-radius: 0 4px 4px 0; }
+blockquote::before { content: "💡 참고 "; font-weight: 700; color: #0969da; }
+table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+th, td { border: 1px solid #d0d7de; padding: 8px 12px; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(2n) { background: #f6f8fa; }
+hr { border: 0; border-top: 1px solid #d0d7de; margin: 2em 0; }
+strong { color: #cf222e; }
+ul, ol { padding-left: 1.6em; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>계획 문서 형식 (plan-format)</h1>
+<p>Claude(오케스트레이터)가 작성하고 실행자(Codex)가 소비하는 계획 파일의 형식.
+위치는 대상 프로젝트의 <code>docs/superpowers/plans/YYYY-MM-DD-&lt;주제&gt;.md</code>
+(superpowers writing-plans 규약과 동일 — 계획 위치를 한 곳으로 통일한다).</p>
+<h2>형식</h2>
+<pre><code class="language-markdown"># &lt;주제&gt; 계획
+
+## 태스크
+
+- [ ] T1: &lt;목표 한 문장&gt;
+  - 대상: &lt;생성/수정할 파일 경로&gt;
+  - 배경: &lt;실행자가 알아야 할 맥락 — 선택 사항&gt;
+  - 검증: `&lt;실행 가능한 커맨드&gt;` → &lt;기대 결과&gt;
+
+- [ ] T2: ...</code></pre>
+<h2>규칙</h2>
+<ol>
+<li><strong><code>검증:</code> 줄이 없는 태스크는 실행자에게 넘기지 않는다.</strong> 실행 가능한
+커맨드와 기대 결과가 품질 게이트의 전부다.</li>
+<li>태스크는 독립적으로 검증 가능한 최소 단위로 자른다.</li>
+<li>체크박스(<code>- [x]</code>) 갱신은 검증 커맨드를 직접 실행한 오케스트레이터만 한다.
+실행자는 체크박스를 건드리지 않는다.</li>
+<li>Linear 큐(Layer B)로 승격할 때는 태스크 1건 = 이슈 1건으로 옮기고,
+<code>검증:</code> 줄을 이슈 본문에 반드시 포함한다.</li>
+</ol>
+</div>
+</body>
+</html>

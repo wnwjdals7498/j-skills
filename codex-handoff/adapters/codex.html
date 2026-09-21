@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>codex</title>
+<style>
+body { font-family: -apple-system, "Apple SD Gothic Neo", "맑은 고딕", sans-serif; color: #24292f; background: #ffffff; line-height: 1.6; max-width: 920px; margin: 0 auto; padding: 40px 32px; }
+h1 { font-size: 2.1em; color: #1f2328; padding-bottom: 12px; border-bottom: 1px solid #d0d7de; margin-top: 0; }
+h2 { font-size: 1.5em; color: #1f2328; padding: 8px 0 8px 14px; border-left: 4px solid #fd8c73; margin-top: 2em; background: linear-gradient(to right, #fff8f0, transparent 60%); }
+h3 { font-size: 1.2em; color: #57606a; margin-top: 1.4em; padding-left: 8px; border-left: 2px solid #d0d7de; }
+p { margin: 0.7em 0; }
+a { color: #0969da; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 0.88em; color: #cf222e; border: 1px solid #d0d7de; }
+pre { background: #0d1117; color: #c9d1d9; padding: 14px 18px; border-radius: 6px; overflow-x: auto; line-height: 1.5; font-size: 0.9em; position: relative; }
+pre::before { content: "CODE"; position: absolute; top: 8px; right: 12px; font-size: 10px; color: #8b949e; letter-spacing: 0.1em; font-family: monospace; }
+pre code { background: transparent; color: inherit; padding: 0; border: 0; }
+blockquote { background: #ddf4ff; border-left: 4px solid #54aeff; padding: 12px 16px; margin: 1em 0; color: #0550ae; border-radius: 0 4px 4px 0; }
+blockquote::before { content: "💡 참고 "; font-weight: 700; color: #0969da; }
+table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+th, td { border: 1px solid #d0d7de; padding: 8px 12px; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(2n) { background: #f6f8fa; }
+hr { border: 0; border-top: 1px solid #d0d7de; margin: 2em 0; }
+strong { color: #cf222e; }
+ul, ol { padding-left: 1.6em; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Codex 어댑터 — Layer B(Linear 큐) 편입</h1>
+<p>Layer A(인라인)는 별도 설정이 필요 없다. 아래는 큐 모드용.</p>
+<h2>1. Linear MCP 등록</h2>
+<p><code>~/.codex/config.toml</code>에 추가 (원격 직결 — 2026-08-03 실측 구성):</p>
+<pre><code class="language-toml">[mcp_servers.linear]
+url = &quot;https://mcp.linear.app/mcp&quot;</code></pre>
+<p>첫 사용 시 OAuth URL이 출력되면 로컬 브라우저에서 열어 인증한다.
+확인: <code>codex mcp list</code>에서 linear가 <code>Status: enabled, Auth: OAuth</code>면 완료.</p>
+<h2>2. 프로젝트 준비</h2>
+<ul>
+<li>없음. 실행자 규약은 프로젝트에 설치하지 않고 <strong>프롬프트에 내장</strong>한다
+(<code>skills/codex-handoff/references/executor-protocol.md</code> 참조 — AGENTS.md 오염 방지).</li>
+</ul>
+<h2>3. 사용</h2>
+<ul>
+<li><p>수동 트리거(기본값):</p>
+<pre><code class="language-bash">codex exec --dangerously-bypass-approvals-and-sandbox -C &lt;프로젝트&gt; \
+  &quot;다음 실행자 규약에 따라 내게 할당된 Todo 이슈 1건을 처리하라.
+&lt;executor-protocol.md의 큐 모드 섹션 전문&gt;&quot;</code></pre></li>
+<li><p>반자동 배치(계획 품질 검증 후 승격): <code>scripts/codex-drain.sh &lt;프로젝트&gt; [필터문구]</code>
+— 이슈당 exec 1회, 기본 상한 5건(<code>MAX</code> 환경변수로 조정), <code>QUEUE_EMPTY</code> 시 즉시 종료.</p></li>
+</ul>
+<h2>보안 주의</h2>
+<p>큐 모드는 <strong>이슈 본문을 지시문으로 실행</strong>하며 샌드박스·승인을 우회한다.
+따라서 이슈 작성 권한이 통제되는(팀 내부) 보드에서만 사용한다. 외부인이
+이슈를 쓸 수 있는 보드에 돌리면 프롬프트 인젝션이 곧 코드 실행이 된다.</p>
+</div>
+</body>
+</html>

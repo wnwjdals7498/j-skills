@@ -1,0 +1,51 @@
+# C1 Task Contract 템플릿
+# 복사: Docs/Code/Tasks/TASK-{nnnn}.yaml
+# 상세: {KIT_ROOT}/references/pipeline/C1_TASK_CONTRACT.md
+
+task_id: TASK-0000
+title: ""
+created_at: null
+
+# 한 문장. 무엇을 만드는가.
+goal: |
+
+# 검증 가능한 문장만. 숫자 / 조건 / 불변식.
+# 형용사("자연스럽게", "적절한")는 금지 — notes 로 밀어낸다.
+# AC 1개당 최소 1개 테스트가 C4 에서 매핑되어야 한다.
+acceptance_criteria: []
+  # - value: "공격 쿨다운 0.4초"
+  #   assumed: true                  # 값을 추정했으면 true
+  #   basis: "기존 DashAbility.cooldown=0.5 와 동급 스케일"
+
+# 이번에 하지 않는 것. 에이전트의 범위 확장을 막는다.
+non_goals: []
+  # - 원거리 공격
+  # - 콤보 시스템
+
+# 반드시 유지되어야 하는 기존 동작. C6 Diff Gate 에서 검증한다.
+invariants: []
+  # - 기존 이동 코드는 변경하지 않는다
+  # - 데미지 계산은 PlayerController 내부에 넣지 않는다
+  # - 기존 EditMode 테스트 18개는 전부 통과 상태를 유지한다
+
+# 건드리면 안 되는 파일/영역. 넘어가야 하면 RISK 승인 대상.
+out_of_bounds: []
+  # - "Assets/Scenes/**"
+  # - "Assets/**/*.prefab"
+  # - "Assets/**/*.asmdef"
+
+# C1 시점에 알 수 있는 위험 신호. C3 에서 정밀 분석.
+risk_signals:
+  serialize_field_change: false
+  scriptable_object_change: false
+  prefab_touch: false
+  scene_touch: false
+  asmdef_touch: false
+  input_addressables_build: false
+  public_api_break: false
+
+# 형용사와 배경 설명은 여기에만.
+notes: |
+
+# C1 EXIT 시점에 남아 있으면 BLOCKED
+open_decisions: []

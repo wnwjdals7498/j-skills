@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>codex-handoff-사용가이드</title>
+<style>
+body { font-family: -apple-system, "Apple SD Gothic Neo", "맑은 고딕", sans-serif; color: #24292f; background: #ffffff; line-height: 1.6; max-width: 920px; margin: 0 auto; padding: 40px 32px; }
+h1 { font-size: 2.1em; color: #1f2328; padding-bottom: 12px; border-bottom: 1px solid #d0d7de; margin-top: 0; }
+h2 { font-size: 1.5em; color: #1f2328; padding: 8px 0 8px 14px; border-left: 4px solid #fd8c73; margin-top: 2em; background: linear-gradient(to right, #fff8f0, transparent 60%); }
+h3 { font-size: 1.2em; color: #57606a; margin-top: 1.4em; padding-left: 8px; border-left: 2px solid #d0d7de; }
+p { margin: 0.7em 0; }
+a { color: #0969da; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 0.88em; color: #cf222e; border: 1px solid #d0d7de; }
+pre { background: #0d1117; color: #c9d1d9; padding: 14px 18px; border-radius: 6px; overflow-x: auto; line-height: 1.5; font-size: 0.9em; position: relative; }
+pre::before { content: "CODE"; position: absolute; top: 8px; right: 12px; font-size: 10px; color: #8b949e; letter-spacing: 0.1em; font-family: monospace; }
+pre code { background: transparent; color: inherit; padding: 0; border: 0; }
+blockquote { background: #ddf4ff; border-left: 4px solid #54aeff; padding: 12px 16px; margin: 1em 0; color: #0550ae; border-radius: 0 4px 4px 0; }
+blockquote::before { content: "💡 참고 "; font-weight: 700; color: #0969da; }
+table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+th, td { border: 1px solid #d0d7de; padding: 8px 12px; }
+th { background: #f6f8fa; font-weight: 600; }
+tr:nth-child(2n) { background: #f6f8fa; }
+hr { border: 0; border-top: 1px solid #d0d7de; margin: 2em 0; }
+strong { color: #cf222e; }
+ul, ol { padding-left: 1.6em; }
+</style>
+</head>
+<body>
+<div class="container">
+<blockquote>
+<p>원본: <code>~/ai-integrate</code> (하이브리드 워크플로우 본부 저장소). 이 사본은 스킬 파악용이며,
+본문 속 <code>scripts/</code>·<code>docs/</code> 상대경로는 원본 저장소 기준이다. adapters/는 이 디렉토리에 동봉.</p>
+</blockquote>
+<h1>ai-integrate — Claude(계획) + Codex(실행) 하이브리드 워크플로우</h1>
+<p>계획·검증은 Claude Code가, 코드 생성은 실행자(Codex)가 맡아 토큰 비용을
+최적화한다. 오케스트레이터는 없다 — 계약 문서 2개와 얇은 스킬 1개가 전부다.</p>
+<h2>언제 무엇을 쓰나</h2>
+<table>
+<thead>
+<tr>
+<th>상황</th>
+<th>레이어</th>
+<th>사용법</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>일상 작업 (단일 세션, 순차)</td>
+<td><strong>A. 인라인</strong></td>
+<td>Claude Code에서 <code>/codex-handoff</code> — 계획 파일의 태스크를 실행자에게 넘기고 검증</td>
+</tr>
+<tr>
+<td>대형 작업, 병렬, 비동기</td>
+<td><strong>B. Linear 큐</strong></td>
+<td><code>linear-register</code>로 이슈 등록 → 실행자가 클레임 프로토콜로 소비</td>
+</tr>
+</tbody>
+</table>
+<h2>다른 프로젝트에 적용하기</h2>
+<ol start="0">
+<li><p>(최초 1회) 스킬 전역 설치 — 모든 프로젝트에서 <code>/codex-handoff</code> 사용 가능
+(이 저장소에서는 <code>~/.claude/skills</code>가 <code>skills/</code>를 가리키는 심볼릭 링크라
+별도 설치가 없다 — <code>skills/</code> 하위를 지우면 설치본이 같이 사라진다):</p>
+<pre><code class="language-bash">ln -sfn ~/ai-integrate/skills/codex-handoff ~/.claude/skills/codex-handoff</code></pre></li>
+<li><p>계획 작성: <code>&lt;프로젝트&gt;/docs/superpowers/plans/YYYY-MM-DD-&lt;주제&gt;.md</code> —
+<code>skills/codex-handoff/references/plan-format.md</code> 형식 (superpowers writing-plans와 동일 위치).
+<strong>태스크마다 실행 가능한 <code>검증:</code> 커맨드 필수.</strong></p></li>
+<li><p>Claude Code(해당 프로젝트)에서 실행: <code>/codex-handoff</code> 로 계획을 지정하면
+태스크별 핸드오프 → 검증 → 체크박스 → 커밋 루프가 돈다.</p></li>
+<li><p>(선택) 대형·병렬 작업은 Layer B로 승격: <code>linear-register</code>로 이슈 등록 후
+<code>adapters/codex.md</code>(Linear MCP 등록·수동 트리거·<code>codex-drain.sh</code>) 절차를 따른다.</p></li>
+</ol>
+<p>대상 프로젝트에 설치할 파일은 <strong>없다</strong> — 실행자 규약은 핸드오프 프롬프트에
+전문이 내장되므로 프로젝트의 AGENTS.md를 건드리지 않는다
+(<code>skills/codex-handoff/references/executor-protocol.md</code> 참조).</p>
+<h2>구성</h2>
+<ul>
+<li><code>skills/codex-handoff/references/plan-format.md</code> — 계획 파일 형식. <strong>검증 커맨드 없는 태스크는 넘기지 않는다.</strong></li>
+<li><code>skills/codex-handoff/references/executor-protocol.md</code> — 실행자 규약(센티널 TASK_DONE/TASK_FAIL/QUEUE_EMPTY). 핸드오프 프롬프트에 전문 내장.</li>
+<li><code>skills/codex-handoff/</code> — Layer A 스킬. 핸드오프 → 판정 → 분기 루프.</li>
+<li><code>scripts/codex-drain.sh</code> — Layer B 반자동 배치 (이슈당 exec 1회, 상한, QUEUE_EMPTY 종료)</li>
+<li><code>adapters/codex.md</code> — Codex 편입 절차(Linear MCP 등록, 큐 모드 트리거, 보안 주의)</li>
+<li><code>docs/</code> — 설계 스펙, 구현 계획, 평가 보고(2026-08-03 todo-app 실험)</li>
+</ul>
+<h2>실측 요약 (2026-08-03 todo-app 실험)</h2>
+<ul>
+<li>비용 구조 검증: 코드 생성 토큰 전량이 실행자 요금제로 이동, Claude는 계획+검증만.
+Codex 소모의 85%는 프롬프트 캐시로 흡수되어 주간 한도 영향 미미.</li>
+<li>Codex: 규약 위반 0회.</li>
+<li>상세: <code>docs/evaluations/2026-08-03-todo-app-eval.md</code></li>
+</ul>
+<h2>설계 문서</h2>
+<ul>
+<li>스펙: <code>docs/superpowers/specs/2026-08-03-claude-codex-hybrid-design.md</code></li>
+<li>구현 계획: <code>docs/superpowers/plans/2026-08-03-claude-codex-hybrid.md</code></li>
+</ul>
+</div>
+</body>
+</html>

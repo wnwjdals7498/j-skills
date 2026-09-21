@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude-Codex 병렬 워크플로"
+  short_description: "Claude 계획과 Codex 병렬 구현·검증·커밋을 조정한다"
+  default_prompt: "$claude-codex-workflow 스킬로 Claude Fable 계획부터 Codex 병렬 구현, 재계획, 검증, 커밋까지 진행해 줘."

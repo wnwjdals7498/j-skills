@@ -1,4 +1,4 @@
 interface:
-  display_name: "Claude-Codex 병렬 워크플로"
-  short_description: "Claude 계획과 Codex 병렬 구현·검증·커밋을 조정한다"
-  default_prompt: "$claude-codex-workflow 스킬로 Claude Fable 계획부터 Codex 병렬 구현, 재계획, 검증, 커밋까지 진행해 줘."
+  display_name: "Claude-Codex 토큰 균형 워크플로"
+  short_description: "Fable 계획과 Codex 구현·검증의 토큰과 시간을 균형 있게 조정한다"
+  default_prompt: "$claude-codex-workflow 스킬의 토큰 우선 균형형 프로필로 계획, 구현, 검증, 로컬 커밋까지 진행해 줘."

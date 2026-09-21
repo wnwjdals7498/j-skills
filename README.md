@@ -6,7 +6,7 @@
 
 | 스킬 | 용도 | 핵심 산출물 |
 | --- | --- | --- |
-| [`claude-codex-workflow`](./claude-codex-workflow/SKILL.md) | Claude Fable 계획과 Codex Sol/Terra 병렬 구현·재계획·검증·커밋 조정 | 환경 스냅샷, 실행 계획, 검증 증거, 로컬 커밋 |
+| [`claude-codex-workflow`](./claude-codex-workflow/SKILL.md) | Claude Fable 계획과 Codex Sol/Terra 구현·검증을 토큰 우선 균형형으로 조정 | 환경 캡슐, 간결 계획, 단계별 검증, 로컬 커밋 |
 | [`codex-handoff`](./codex-handoff/SKILL.md) | 계획 태스크를 Codex 실행자에게 인라인 또는 큐 방식으로 전달 | 태스크별 실행·검증 결과와 핸드오프 센티널 |
 | [`project-debate`](./project-debate/SKILL.md) | 상충하는 선택지를 A·B·C 역할로 검토하고 근거 기반 결정을 정리 | 회차별 주장·반박 기록과 정량 근거 보고서 |
 | [`proj-mgmt-tool-v2`](./proj-mgmt-tool-v2/SKILL.md) | 장기 작업의 상태·결정·검증 기록을 로컬 문서로 관리 | 프로젝트 재개 정보, 작업 이력, 검증 기록 |

@@ -17,37 +17,9 @@ python3 <skill-dir>/scripts/pmt.py [--docs-root <path>] [--session <stable-id>] 
 
 기본 데이터 루트는 `~/docs`이며 격리는 `--docs-root` 또는 `PMT_DOCS_ROOT`를 쓴다. `--session`을 생략하면 조부모 프로세스 기준으로 자동 파생한다. 서브에이전트는 같은 세션이므로 PMT 문서와 lock을 만지지 않는다.
 
-## 도구 겸용 — Claude Code / codex
+## 도구별 등록과 호출
 
-이 스킬은 두 도구가 **같은 `~/docs` 를 공유**한다. 명령·불변식·완료 보고 형식은 도구와 무관하게 같다.
-
-| 항목 | Claude Code | codex |
-|---|---|---|
-| 스킬 경로 | `~/.claude/skills/proj-mgmt-tool/` | `~/.codex/skills/proj-mgmt-tool/` |
-| 발동 | `Skill` 도구 | **자동 발동이 없다.** `cat ~/.codex/skills/proj-mgmt-tool/SKILL.md` 로 읽고 그대로 따른다 |
-| 엔진 | `<skill-dir>/scripts/pmt.py` | 같다 |
-
-**두 경로는 사본이 아니라 같은 실체다.** 실물은 `~/j-skills/proj-mgmt-tool-v2` 이고 링크가 두 단이다.
-
-```
-~/.codex/skills/proj-mgmt-tool -> ~/.claude/skills/proj-mgmt-tool -> ~/j-skills/proj-mgmt-tool-v2
-```
-
-그래서 **어느 경로로 고치든 양쪽에 동시에 반영된다.** 동기화할 것이 없고, 반대로 한쪽만 바꿀 수도 없다. 링크가 끊겼는지만 가끔 본다.
-
-```bash
-readlink -f ~/.codex/skills/proj-mgmt-tool    # ~/j-skills/proj-mgmt-tool-v2 이어야 한다
-P=~/.claude/skills/proj-mgmt-tool/scripts/pmt.py
-python3 $P --session "$PMT_SESSION" --project <slug> resume <slug>
-```
-
-### 도구와 무관하게 밟는 함정
-
-1. **`--session` 을 명시한다.** lock 은 셸 세션 계보로 잡혀서 `python3 -c`·`subprocess` 로 부르면 `lock not owned by session` 이 난다. `start` 를 돌린 것과 **같은 방식**으로 `end` 도 돌린다.
-2. **`add item` 은 `WorkN-1` 로 이름을 만든다.** `WorkN-J1` 관례를 쓰는 프로젝트는 만든 뒤 파일명과 파일 안 `id:` 행을 함께 고친다. 두 번째 Item 도 다시 `WorkN-1` 을 받는다 — 엔진이 개명한 이름을 자기 패턴으로 못 읽는다.
-3. **`## 완료 기준` 이 비어 있으면 `verify` 가 거부된다.** `start` 직후 `## 기본 내용`·`## 범위`·`## 완료 기준` 세 절을 먼저 채운다.
-4. **긴 `--result`·`--context` 는 `$(cat <<'EOF' … EOF)` 로 넘긴다.** 큰따옴표 안의 `$(...)` 를 셸이 명령 치환으로 먹는다.
-5. **`repositories[0]` 이 아닌 저장소에서 작업했으면** `verify`·`end` 가 찍는 commit 열이 그 저장소의 HEAD 가 아니다. 결과문에 실제 커밋 sha 를 직접 적는다.
+Codex·Claude Code는 같은 PMT 원천과 `~/docs` 문서를 공유한다. 사본 대신 원천 폴더를 가리키는 디렉터리 링크로 등록한다. Windows·Unix 경로와 호출 시 주의점은 [설치·운영 참고](references/installation.md)를 읽는다. lock 소유가 달라지지 않도록 `--session`을 고정하고 같은 방식으로 `start`·`end`를 호출한다.
 
 ## 불변식
 

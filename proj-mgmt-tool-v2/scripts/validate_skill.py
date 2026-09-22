@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import py_compile
 import re
 import subprocess
 import sys
@@ -79,7 +78,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         fail(f"too many subcommands: {command_count}")
     for rel in ("scripts/pmt.py", "scripts/migrate_v1.py", "scripts/validate_skill.py", "tests/test_pmt.py"):
         if (root / rel).exists():
-            py_compile.compile(str(root / rel), doraise=True)
+            compile((root / rel).read_text(encoding="utf-8"), str(root / rel), "exec")
 
     print("PASS: skill package validates")
     if args.run_tests:

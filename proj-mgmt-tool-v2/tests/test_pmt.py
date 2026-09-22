@@ -127,7 +127,8 @@ class PmtTest(unittest.TestCase):
 
         self.assertIn("last durable checkpoint", resume)
         self.assertIn("비정상 종료 추정", resume)
-        self.assertIn(missing, reaped.stderr)
+        self.assertIn("Missing.md", reaped.stderr)
+        self.assertIn("missing file", reaped.stderr)
 
     def test_done_requires_result_and_marks_parent_done_when_children_done(self):
         slug, work, item = self.make_item()
@@ -244,7 +245,8 @@ class PmtTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("id/path mismatch", result.stdout)
-        self.assertIn(f"경고: {invalid}", result.stderr)
+        self.assertIn("경고:", result.stderr)
+        self.assertIn("invalid.md", result.stderr)
 
     def test_doctor_fails_on_missing_parent(self):
         slug, work, _item = self.make_item()
@@ -372,6 +374,8 @@ class PmtTest(unittest.TestCase):
         slug, _work, item = self.make_item(slug="stable-session")
 
         self.run_pmt("--project", slug, "start", item, session=None)
+        lock_path = next((self.docs / "projects" / slug / ".locks").glob("*.lock/lock.json"))
+        session_before = json.loads(lock_path.read_text(encoding="utf-8"))["session"]
         noted = self.run_pmt(
             "--project",
             slug,
@@ -386,11 +390,9 @@ class PmtTest(unittest.TestCase):
 
         self.assertEqual(noted.returncode, 0)
         self.assertIn("noted", noted.stdout)
-        lock_data = next(
-            json.loads(path.read_text(encoding="utf-8"))
-            for path in (self.docs / "projects" / slug / ".locks").glob("*.lock/lock.json")
-        )
-        self.assertEqual(lock_data["session"], f"pid-{os.getppid()}")
+        lock_data = json.loads(lock_path.read_text(encoding="utf-8"))
+        self.assertEqual(lock_data["session"], session_before)
+        self.assertTrue(session_before.startswith(("pid-", "session-")))
 
     def test_start_reaps_stale_lock_and_marks_abnormal_exit(self):
         slug, work, item = self.make_item(slug="stale-start")
@@ -470,7 +472,12 @@ class PmtTest(unittest.TestCase):
         self.assertEqual(conflict.returncode, 1)
         self.assertEqual(wrong_release.returncode, 1)
         self.assertIn(item, listed.stdout)
-        self.assertIn(repo_id, listed.stdout)
+        listed_ids = {
+            json.loads(line)["id"]
+            for line in listed.stdout.splitlines()
+            if line.strip()
+        }
+        self.assertIn(repo_id, listed_ids)
 
         self.run_pmt("lock", "release", "--repo", str(repo), session="owner")
         self.run_pmt("lock", "acquire", "--repo", str(repo), session="owner")

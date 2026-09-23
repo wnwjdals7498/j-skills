@@ -1,0 +1,4 @@
+interface:
+  display_name: "ctx-relay"
+  short_description: "Per-repo task relay for rotating small models"
+  default_prompt: "Use $ctx-relay to plan tasks in .ctx/TASKS.md for small executor models, or unblock the current task."

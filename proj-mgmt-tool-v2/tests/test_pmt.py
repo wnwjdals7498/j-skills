@@ -1029,9 +1029,42 @@ class PmtTest(unittest.TestCase):
         self.assertIn("프로젝트 종료는 --confirm 필요", rejected.stderr)
         self.assertEqual(closed.returncode, 0)
         self.assertIn(f"경고: 미완료 Work: {work}", closed.stderr)
-        self.assertIn("status: Done", project.read_text(encoding="utf-8"))
-        self.assertIn(f"| {slug} | Done |", projects.read_text(encoding="utf-8"))
         self.assertIn(f"프로젝트 종료: {slug}", closed.stdout)
+        # 종료된 프로젝트는 projects/_archive/<slug> 로 자동 보관되고 색인은 Archived 표에 실린다
+        archived = self.docs / "projects" / "_archive" / slug / "project.md"
+        self.assertFalse(project.exists())
+        self.assertIn("status: Done", archived.read_text(encoding="utf-8"))
+        self.assertIn("archived_at:", archived.read_text(encoding="utf-8"))
+        self.assertIn("## Archived", projects.read_text(encoding="utf-8"))
+        self.assertIn(f"| {slug} | Done |", projects.read_text(encoding="utf-8"))
+        self.assertIn(f"보관: {archived.parent}", closed.stdout)
+        # 보관 프로젝트는 resume·find 가 읽기 전용으로 보이고, 쓰기 명령은 활성 트리에 없어 실패한다
+        resumed = self.run_pmt("resume", slug)
+        self.assertIn("보관 프로젝트(읽기 전용)", resumed.stderr)
+        self.assertIn(f"# RESUME - {slug}", resumed.stdout)
+        found = self.run_pmt("--project", slug, "find", "ship alpha")
+        self.assertIn("project.md", found.stdout)
+        self.assertNotEqual(self.run_pmt("--project", slug, "add", "work", "Late", ok=False).returncode, 0)
+        # 복귀는 set <slug> --status 'In Progress' 하나로 하고 다른 상태는 거부한다
+        wrong = self.run_pmt("set", slug, "--status", "Done", ok=False)
+        self.assertEqual(wrong.returncode, 2)
+        restored = self.run_pmt("set", slug, "--status", "In Progress")
+        self.assertIn(f"복귀: {project.parent}", restored.stdout)
+        self.assertIn("status: In Progress", project.read_text(encoding="utf-8"))
+        self.assertNotIn("archived_at", project.read_text(encoding="utf-8"))
+        self.assertNotIn("## Archived", projects.read_text(encoding="utf-8"))
+
+    def test_project_close_keeps_recurring_project_in_place(self):
+        slug = "ops-recurring"
+        self.run_pmt("new", slug, "--goal", "상시 운영", "--label", "상시")
+        closed = self.run_pmt("end", slug, "--done", "--confirm")
+        project = self.docs / "projects" / slug / "project.md"
+
+        self.assertEqual(closed.returncode, 0)
+        self.assertIn("보관하지 않고", closed.stderr)
+        self.assertTrue(project.exists())
+        self.assertFalse((self.docs / "projects" / "_archive" / slug).exists())
+        self.assertNotIn("## Archived", (self.docs / "projects" / "projects.md").read_text(encoding="utf-8"))
 
     def test_done_gate_requires_unverified_when_criteria_empty(self):
         slug, _work, item = self.make_item(slug="empty-gate")

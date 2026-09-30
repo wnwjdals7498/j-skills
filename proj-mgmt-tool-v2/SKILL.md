@@ -31,6 +31,7 @@ Codex·Claude Code는 같은 PMT 원천과 `~/docs` 문서를 공유한다. 사�
 6. 착수 가능·차단·계보는 `RESUME.md`와 `find`로 본다. 원본 통독 금지.
 7. 목록 행은 `set --status`로 전이하고 엔진이 8,000자 초과 시 자동 archive. 결정은 삭제하지 않고 `대체`·`폐기`로만 남긴다.
 8. Project·Work·Item은 링크 없이도 범위·결정·완료 기준·결과를 이해할 수 있게 자체 완결로 유지한다.
+9. 종료 프로젝트는 `projects/_archive/<slug>/`에 보관한다. `end <slug> --done --confirm`이 자동으로 옮기고, `labels`에 `상시`(유지보수·주기 갱신)가 있으면 제자리에 둔다. 보관본은 `resume`·`find`로만 읽고, 다시 손대려면 `set <slug> --status 'In Progress'`로 복귀한다.
 
 ## 진입
 

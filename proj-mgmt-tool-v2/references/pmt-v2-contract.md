@@ -6,7 +6,8 @@
 
 ```text
 <docs-root>/
-├── projects/projects.md
+├── projects/projects.md          (활성 표 + `## Archived` 표)
+├── projects/_archive/<slug>/     (종료 프로젝트 보관. 구조는 아래와 같고 frontmatter 에 archived_at)
 ├── projects/<slug>/
 │   ├── project.md
 │   ├── RESUME.md
@@ -65,13 +66,13 @@ Item frontmatter 핵심은 `type`, `kind`, `id`, `parent`, `status`, `updated`, 
 | `resume` | `<slug>`; 목록 자동 압축 뒤 RESUME 재생성·출력 |
 | `add` | `work|item|fact|backlog`; ID를 발급하며 RESUME는 즉시 갱신하지 않음 |
 | `decide` | `<title> --context --decision [--alt --result --supersedes --decider]`; 승인 결정 기록 |
-| `set` | `<ID> --status [--why]` 또는 `<item-id> --blocked-by|--unblock` |
+| `set` | `<ID> --status [--why]` 또는 `<item-id> --blocked-by|--unblock`. `<slug> --status 'In Progress'` 는 보관 프로젝트를 활성 트리로 복귀 |
 | `start` | `<item-id> [--note] [--delegate] [--worktree]`; 점유·상태 승격·기준 commit 기록 |
 | `note` | `<item-id> --did --next [--watch --wait --unverified]`; 재개·heartbeat 갱신 |
 | `verify` | `<item-id> --cmd (--exit N|--run) [--cwd --limit]`; 검증 행·worklog 기록 |
-| `end` | Item 완료·중지·실패·취소, `--all --pause`, 프로젝트 `--done --confirm` |
+| `end` | Item 완료·중지·실패·취소, `--all --pause`, 프로젝트 `--done --confirm`(Done 표시 뒤 `_archive/` 로 자동 이동. labels 에 `상시` 가 있으면 제자리 유지. 이미 Done 인 프로젝트에 다시 돌리면 이동만 한다) |
 | `lock` | `acquire|beat|release|list|reap [id] [--repo <path>]...`; Item·저장소 lock 관리 |
-| `find` | `[query] [--chain D<n>]`; 원본·archive·worklog 검색 또는 결정 계보 출력 |
+| `find` | `[query] [--chain D<n>]`; 원본·archive·worklog 검색 또는 결정 계보 출력. `resume`·`find` 는 활성 트리에 없는 slug 를 `_archive/` 에서 읽기 전용으로 찾는다(쓰기 명령은 복귀 뒤에만) |
 | `doctor` | `[--scope <classification>]`; 무결성 fail·warn 출력 |
 | `sync` | 숨김 명령. RESUME와 projects 색인을 재생성 |
 | `compact` | 숨김 명령. 8,000자 초과 목록의 종료 상태 행을 archive로 이동 |

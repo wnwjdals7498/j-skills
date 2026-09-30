@@ -26,6 +26,8 @@ GENERATED = {"RESUME.md"}
 SKIP_DIRS = {"archive", "canceled", "resources", ".locks", ".migration-v1-backup", "decisions"}
 STALE_MINUTES = 30
 WARN_MINUTES = 20
+ARCHIVE_DIR = "_archive"  # 종료 프로젝트 보관 폴더(projects/ 아래). 상시 라벨 프로젝트는 예외
+RECURRING_LABEL = "상시"
 
 
 class PmtError(Exception):
@@ -223,6 +225,8 @@ class Context:
             rel = cwd.relative_to(root)
         except ValueError:
             return None
+        if len(rel.parts) > 1 and rel.parts[0] == ARCHIVE_DIR:
+            return rel.parts[1]
         return rel.parts[0] if rel.parts else None
 
     def require_project(self) -> str:
@@ -232,6 +236,9 @@ class Context:
 
     def project_dir(self, slug: Optional[str] = None) -> Path:
         return self.projects_root / (slug or self.require_project())
+
+    def archived_dir(self, slug: Optional[str] = None) -> Path:
+        return self.projects_root / ARCHIVE_DIR / (slug or self.require_project())
 
 
 def id_to_path(project_dir: Path, item_id: str) -> Path:
@@ -297,7 +304,47 @@ def project_indexes(ctx: Context) -> None:
         fm, _ = read_doc(path)
         labels = ", ".join(as_list(fm.get("labels")))
         rows.append(f"| {project.name} | {fm.get('status', '')} | {fm.get('updated', '')} | {labels} |")
+    archived = []
+    for path in sorted((ctx.projects_root / ARCHIVE_DIR).glob("*/project.md")):
+        fm, _ = read_doc(path)
+        labels = ", ".join(as_list(fm.get("labels")))
+        archived.append(f"| {path.parent.name} | {fm.get('status', '')} | {fm.get('archived_at', '')} | {labels} |")
+    if archived:
+        rows += ["", f"## Archived ({ARCHIVE_DIR}/)", "| slug | status | archived | labels |", "|---|---|---|---|"] + archived
     (ctx.projects_root / "projects.md").write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def archive_project(ctx: Context, slug: str) -> Path:
+    src, dst = ctx.project_dir(slug), ctx.archived_dir(slug)
+    fm, body = read_doc(src / "project.md")
+    if RECURRING_LABEL in as_list(fm.get("labels")):
+        raise PmtError(f"{slug} 는 labels 에 '{RECURRING_LABEL}' 가 있어 보관하지 않는다", 2)
+    if fm.get("status") not in {"Done", "Canceled"}:
+        raise PmtError(f"{slug} status={fm.get('status')} — Done·Canceled 만 보관", 2)
+    live = [r["id"] for r in read_locks(project_lock_base(src)) if not r["stale"] and not str(r["id"]).startswith("__")]
+    if live:
+        raise PmtError(f"{slug} 에 살아 있는 lock: {', '.join(map(str, live))} — 먼저 end --all --pause", 1)
+    if dst.exists():
+        raise PmtError(f"보관 위치가 이미 있다: {dst}", 1)
+    fm["archived_at"] = today()
+    write_doc(src / "project.md", fm, body)
+    ensure_dir(dst.parent)
+    shutil.move(str(src), str(dst))
+    project_indexes(ctx)
+    return dst
+
+
+def restore_project(ctx: Context, slug: str) -> Path:
+    src, dst = ctx.archived_dir(slug), ctx.project_dir(slug)
+    if dst.exists():
+        raise PmtError(f"활성 트리에 이미 있다: {dst}", 1)
+    fm, body = read_doc(src / "project.md")
+    fm.pop("archived_at", None)
+    fm.update({"status": "In Progress", "updated": today()})
+    write_doc(src / "project.md", fm, body)
+    shutil.move(str(src), str(dst))
+    project_indexes(ctx)
+    return dst
 
 
 def list_template(kind: str, slug: str) -> str:
@@ -613,6 +660,11 @@ def cmd_set(ctx: Context, args: argparse.Namespace) -> int:
         if args.status is None or relation_modes:
             raise PmtError("list status update requires --status", 2)
         return set_list_status(ctx, args, match.group(1))
+    if "/" not in args.target and ctx.archived_dir(args.target).is_dir():
+        if args.status != "In Progress" or relation_modes:
+            raise PmtError("보관 프로젝트 복귀는 set <slug> --status 'In Progress' 만 받는다", 2)
+        print(f"복귀: {restore_project(ctx, args.target)}")
+        return 0
     if args.status is not None or args.why is not None or relation_modes != 1:
         raise PmtError("item relation update requires exactly one of --blocked-by or --unblock", 2)
     project_dir = ctx.project_dir()
@@ -1091,6 +1143,10 @@ def cmd_end(ctx: Context, args: argparse.Namespace) -> int:
         write_doc(path, fm, body)
         sync(ctx, project_dir)
         print(f"프로젝트 종료: {args.item_id}")
+        if RECURRING_LABEL in as_list(fm.get("labels")):
+            print(f"알림: '{RECURRING_LABEL}' 라벨 — 보관하지 않고 제자리에 둔다", file=sys.stderr)
+        else:
+            print(f"보관: {archive_project(ctx, project_dir.name)}")
         return 0
     if args.done:
         if not args.result:
@@ -1471,6 +1527,10 @@ def recent_worklog(ctx: Context, slug: str, limit: int) -> List[str]:
 def cmd_resume(ctx: Context, args: argparse.Namespace) -> int:
     ctx.project = args.slug
     project_dir = ctx.project_dir(args.slug)
+    if not project_dir.is_dir() and ctx.archived_dir(args.slug).is_dir():
+        print("알림: 보관 프로젝트(읽기 전용) — 복귀는 pmt set <slug> --status 'In Progress'", file=sys.stderr)
+        print(render_resume(ctx, ctx.archived_dir(args.slug), scan_docs(ctx.archived_dir(args.slug))))
+        return 0
     compact_lists(ctx, project_dir, skip_busy=True)
     sync(ctx, project_dir)
     print((project_dir / "RESUME.md").read_text(encoding="utf-8"))
@@ -1600,7 +1660,7 @@ def cmd_find_chain(project_dir: Path, start_id: str) -> int:
 
 
 def cmd_find(ctx: Context, args: argparse.Namespace) -> int:
-    project_dir = ctx.project_dir()
+    project_dir = ctx.project_dir() if ctx.project_dir().is_dir() else ctx.archived_dir()
     if args.chain:
         return cmd_find_chain(project_dir, args.chain)
     if not args.query:
@@ -1899,6 +1959,8 @@ def main(argv: Sequence[str] = sys.argv[1:]) -> int:
         ctx = Context(args)
         if not ctx.project and args.command == "resume":
             ctx.project = args.slug
+        if args.command not in {"new", "resume", "find", "set"} and ctx.project and not ctx.project_dir().is_dir() and ctx.archived_dir().is_dir():
+            raise PmtError(f"{ctx.project} 는 보관 프로젝트 — pmt set {ctx.project} --status 'In Progress' 로 복귀한 뒤 수정", 2)
         if ctx.project and ctx.project_dir().is_dir():
             rows = sorted(read_locks(project_lock_base(ctx.project_dir())), key=lambda row: str(row.get("id")))
             for row in rows:

@@ -1,0 +1,4 @@
+interface:
+  display_name: "공개 기술 블로그"
+  short_description: "공개 기술 글을 간결·위트·실습형으로 쓰고 제목 3안과 태그 3안을 낸다"
+  default_prompt: "$public-tech-blog 스킬로 이 자료를 공개용 실습형 블로그 글로 써 줘. 제목 3안과 태그 3안도 같이."

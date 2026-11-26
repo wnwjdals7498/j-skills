@@ -11,6 +11,7 @@
 | [`project-debate`](./project-debate/SKILL.md) | 상충하는 선택지를 A·B·C 역할로 검토하고 근거 기반 결정을 정리 | 회차별 주장·반박 기록과 정량 근거 보고서 |
 | [`proj-mgmt-tool-v2`](./proj-mgmt-tool-v2/SKILL.md) | 장기 작업의 상태·결정·검증 기록을 로컬 문서로 관리 | 프로젝트 재개 정보, 작업 이력, 검증 기록 |
 | [`ctx-relay`](./ctx-relay/SKILL.md) | opencode + freellmapi처럼 모델이 계속 바뀌는 소형 모델 환경에서 레포 단위로 작업을 이어감 | `.ctx/` STATE·TASKS·LOG, 형식 검사 스크립트, AGENTS.md 트리거 |
+| [`public-tech-blog`](./public-tech-blog/SKILL.md) | 사내 조사 자료나 초안을 공개용 기술 블로그 글로 간결·위트·실습형으로 작성 | 블로그 Markdown, 제목 3안·태그 3안, 공개 전 점검 결과 |
 
 ## 원칙
 
@@ -24,6 +25,7 @@
 python proj-mgmt-tool-v2/scripts/validate_skill.py
 python proj-mgmt-tool-v2/scripts/pmt.py --help
 python -m unittest discover -s ctx-relay/tests
+python -m unittest discover -s public-tech-blog/tests
 ```
 
 ## 설계 문서
